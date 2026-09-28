@@ -740,8 +740,10 @@ impl App {
                 self.open_codex_accounts();
             }
             let content = panel_inner(panel);
-            let rows =
-                embedded_account_rows(content, self.codex_ui.busy && !self.codex_ui.refreshing);
+            let rows = codex_embedded_account_rows(
+                content,
+                self.codex_ui.busy && !self.codex_ui.refreshing,
+            );
             match mouse.kind {
                 MouseEventKind::ScrollDown => {
                     if contains(rows[1], mouse.column, mouse.row) {
@@ -823,7 +825,7 @@ impl App {
                 self.codex_ui.selected = self.codex_ui.selected.saturating_sub(1)
             }
             MouseEventKind::Down(MouseButton::Left) => {
-                let rows = account_page_rows(workspace_content_area(area), false);
+                let rows = codex_account_page_rows(workspace_content_area(area), false);
                 let visible = rows[1].height.saturating_sub(2) as usize;
                 let offset = self
                     .codex_ui
@@ -867,9 +869,9 @@ impl App {
     ) {
         let login_busy = self.codex_ui.busy && !self.codex_ui.refreshing;
         let rows = if embedded {
-            embedded_account_rows(content, login_busy)
+            codex_embedded_account_rows(content, login_busy)
         } else {
-            account_page_rows(content, login_busy)
+            codex_account_page_rows(content, login_busy)
         };
         frame.render_widget(
             Paragraph::new(Line::from(vec![Span::styled(
@@ -1022,15 +1024,22 @@ impl App {
                 continue;
             }
             frame.render_widget(
-                Paragraph::new(label)
-                    .alignment(Alignment::Center)
-                    .style(button_style(
-                        false,
-                        (self.codex_ui.busy && key != '\u{1b}')
-                            || (matches!(key, 'e' | 'p' | 'r' | 'w' | 'x')
-                                && self.selected_codex_account().is_none()),
-                        false,
-                    )),
+                Paragraph::new(toolbar::action_line(
+                    label,
+                    if (self.codex_ui.busy && key != '\u{1b}')
+                        || (matches!(key, 'e' | 'p' | 'r' | 'w' | 'x')
+                            && self.selected_codex_account().is_none())
+                    {
+                        MUTED
+                    } else if key == '\u{1b}' {
+                        FIELD_LABEL
+                    } else {
+                        ROUTE
+                    },
+                    false,
+                    self.theme,
+                ))
+                .alignment(Alignment::Center),
                 rect,
             );
         }
@@ -1239,6 +1248,14 @@ pub(super) fn usage_display_lines(details: &str, width: u16) -> Vec<Line<'static
     lines
 }
 
+fn codex_account_page_rows(area: Rect, login_busy: bool) -> [Rect; 4] {
+    account_page_rows_with_footer(area, login_busy, account_button_height(area.width))
+}
+
+fn codex_embedded_account_rows(area: Rect, login_busy: bool) -> [Rect; 4] {
+    embedded_account_rows_with_footer(area, login_busy, account_button_height(area.width))
+}
+
 fn account_input_area(area: Rect) -> Rect {
     centered_rect(
         area.width.saturating_sub(4).min(72),
@@ -1250,16 +1267,16 @@ fn account_input_area(area: Rect) -> Rect {
 // Shared hit regions and rendering keep mouse actions aligned at every width.
 pub(super) fn account_buttons(area: Rect) -> Vec<(char, &'static str, Rect)> {
     let labels = [
-        ('i', "Import (i)"),
-        ('I', "File (I)"),
-        ('b', "Browser b"),
-        ('d', "Device d"),
-        ('e', "Rename (e)"),
-        ('x', "Delete (x)"),
-        ('r', "Refresh r"),
-        ('w', "Wake w"),
-        ('p', "Apply (p)"),
-        ('\u{1b}', "Back (Esc)"),
+        ('i', "Import [i]"),
+        ('I', "File [I]"),
+        ('b', "Browser [b]"),
+        ('d', "Device [d]"),
+        ('e', "Rename [e]"),
+        ('x', "Delete [x]"),
+        ('r', "Refresh [r]"),
+        ('w', "Wake [w]"),
+        ('p', "Apply [p]"),
+        ('\u{1b}', "Back [Esc]"),
     ];
     let natural: u16 = labels
         .iter()
@@ -1269,8 +1286,8 @@ pub(super) fn account_buttons(area: Rect) -> Vec<(char, &'static str, Rect)> {
     let padding = if roomy { 2 } else { 0 };
     let gap = if roomy { 2 } else { 1 };
     let mut x = area.x;
-    let mut y = area.bottom().saturating_sub(3);
-    labels
+    let mut y = 0;
+    let mut buttons: Vec<_> = labels
         .into_iter()
         .map(|(key, label)| {
             let width = UnicodeWidthStr::width(label) as u16 + padding;
@@ -1282,7 +1299,19 @@ pub(super) fn account_buttons(area: Rect) -> Vec<(char, &'static str, Rect)> {
             x += width + gap;
             (key, label, rect)
         })
-        .collect()
+        .collect();
+    let height = (y + 1).max(3);
+    let top = area.bottom().saturating_sub(height).max(area.y);
+    for (_, _, rect) in &mut buttons {
+        rect.y += top;
+    }
+    buttons
+}
+
+pub(super) fn account_button_height(width: u16) -> u16 {
+    account_buttons(Rect::new(0, 0, width, 0))
+        .last()
+        .map_or(3, |(_, _, rect)| rect.bottom().max(3))
 }
 
 #[cfg(test)]
@@ -1562,7 +1591,7 @@ mod login_ui_tests {
             .map(|cell| cell.symbol())
             .collect();
         assert!(waking.contains("Waking account") && waking.contains("ChatGPT accounts"));
-        assert!(waking.contains("Wake w"));
+        assert!(waking.contains("Wake [w]"));
         let controls = account_buttons(Rect::new(0, 0, 120, 30));
         assert_eq!(controls[0].2.x, 0);
         let gap = controls[1].2.x - controls[0].2.right();

@@ -335,6 +335,18 @@ pub(super) fn help_commands(section: HelpSection) -> &'static [(&'static str, &'
             ("? / F2", "Help / switch agent when navigation is available"),
         ],
         HelpSection::Settings => &[
+            (
+                "Refresh 1–6",
+                "Choose 1 / 2 / 5 / 10 / 30 / 60 second presets",
+            ),
+            (
+                "Refresh − / +",
+                "Decrease / increase the interval (1–60 seconds)",
+            ),
+            (
+                "Display / Proxy",
+                "Switch sections without losing display changes",
+            ),
             ("F4", "Open settings from provider, model or Usage pages"),
             (
                 "Tab / p / Shift+Tab",

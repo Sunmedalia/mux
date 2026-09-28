@@ -191,6 +191,7 @@ impl HelpModal {
 
 #[derive(Clone)]
 pub(super) struct ProxyManager {
+    pub(super) return_appearance: Option<theme::Appearance>,
     pub(super) port_field: Option<FormField>,
     pub(super) port_changed: bool,
     pub(super) instance: uuid::Uuid,

@@ -6,6 +6,10 @@ impl App {
         let theme = match &self.modal {
             Some(Modal::Appearance(form)) => form.theme,
             Some(Modal::Preferences(form)) => form.return_theme.unwrap_or(self.theme),
+            Some(Modal::Proxy(manager)) => manager
+                .return_appearance
+                .as_ref()
+                .map_or(self.theme, |form| form.theme),
             _ => self.theme,
         };
         theme.apply(frame.buffer_mut());
@@ -380,16 +384,21 @@ impl App {
         );
         draw_header_add_button(frame, area);
         self.profile_offset = state.offset();
-        let visible_items = if is_home {
-            visible_variable_items(
-                &item_heights,
-                self.profile_offset,
-                usize::from(area.height.saturating_sub(2)),
+        let (length, offset) = if is_home {
+            (
+                item_heights.iter().sum(),
+                item_heights.iter().take(self.profile_offset).sum(),
             )
         } else {
-            usize::from(area.height.saturating_sub(2))
+            (item_count, self.profile_offset)
         };
-        draw_scrollbar(frame, area, item_count, selected, visible_items);
+        draw_scrollbar(
+            frame,
+            area,
+            length,
+            offset,
+            usize::from(area.height.saturating_sub(2)),
+        );
     }
 
     pub(super) fn draw_models(&mut self, frame: &mut ratatui::Frame, area: Rect) {
@@ -449,9 +458,9 @@ impl App {
             draw_scrollbar(
                 frame,
                 area,
-                models.len(),
-                self.model_idx,
-                usize::from(area.height.saturating_sub(2) / 2),
+                models.len() * 2,
+                self.model_offset * 2,
+                usize::from(area.height.saturating_sub(2)),
             );
             if models.is_empty() {
                 frame.render_widget(
@@ -638,7 +647,7 @@ impl App {
                 frame,
                 list_area,
                 filtered.len(),
-                editor.selected,
+                state.offset(),
                 usize::from(inner.height),
             );
             return;
@@ -692,9 +701,9 @@ impl App {
         draw_scrollbar(
             frame,
             area,
-            models.len(),
-            self.model_idx,
-            usize::from(area.height.saturating_sub(2) / 2),
+            models.len() * 2,
+            self.model_offset * 2,
+            usize::from(area.height.saturating_sub(2)),
         );
     }
 
@@ -946,6 +955,21 @@ impl App {
             provider_identity,
             detail("Calls", &self.provider_usage_label(false)),
             detail("Tokens", &self.provider_usage_label(true)),
+            detail(
+                match self.config_tab() {
+                    ClientTab::Claude => "Claude /model",
+                    ClientTab::Codex => "Codex models",
+                    ClientTab::Pi => "Pi /model",
+                    ClientTab::Grok => "Grok /model",
+                    ClientTab::Usage | ClientTab::Settings => unreachable!(),
+                },
+                &format!(
+                    "{} models across {} providers",
+                    self.all_enabled_model_count(),
+                    self.config.profiles.len()
+                ),
+            ),
+            Line::raw(""),
             detail("API format", &api_format),
             detail("Endpoint", &profile.base_url),
             detail("Credential", &profile.credential.masked()),
@@ -963,21 +987,6 @@ impl App {
                 },
                 ENABLED,
             ),
-            detail(
-                match self.config_tab() {
-                    ClientTab::Claude => "Claude /model",
-                    ClientTab::Codex => "Codex models",
-                    ClientTab::Pi => "Pi /model",
-                    ClientTab::Grok => "Grok /model",
-                    ClientTab::Usage | ClientTab::Settings => unreachable!(),
-                },
-                &format!(
-                    "{} models across {} providers",
-                    self.all_enabled_model_count(),
-                    self.config.profiles.len()
-                ),
-            ),
-            Line::raw(""),
         ];
         if self.pi_enabled {
             lines.insert(

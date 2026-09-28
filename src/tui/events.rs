@@ -638,12 +638,34 @@ impl App {
         }
         if matches!(self.modal, Some(Modal::Appearance(_))) {
             let modal_area = modal_area_for(self.modal.as_ref().unwrap(), area);
+            if matches!(
+                mouse.kind,
+                MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+            ) {
+                self.handle_modal(KeyEvent::new(
+                    if mouse.kind == MouseEventKind::ScrollUp {
+                        KeyCode::Up
+                    } else {
+                        KeyCode::Down
+                    },
+                    KeyModifiers::NONE,
+                ))?;
+                return Ok(MouseAction::None);
+            }
             if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
                 if contains(settings_proxy_button(modal_area), mouse.column, mouse.row) {
                     self.open_proxy_manager();
                     return Ok(MouseAction::None);
                 }
-                if let Some((index, _)) = theme::rows(
+                if matches!(&self.modal, Some(Modal::Appearance(form)) if form.refresh_selected)
+                    && let Some((seconds, _)) = theme::refresh_presets(modal_area)
+                        .into_iter()
+                        .find(|(_, rect)| contains(*rect, mouse.column, mouse.row))
+                {
+                    if let Some(Modal::Appearance(form)) = &mut self.modal {
+                        form.usage_refresh_secs = seconds;
+                    }
+                } else if let Some((index, _)) = theme::rows(
                     modal_area,
                     match self.modal.as_ref().unwrap() {
                         Modal::Appearance(form) => form,
@@ -661,7 +683,9 @@ impl App {
                             form.theme = theme::Theme::ALL[index];
                         }
                     }
-                } else if contains(theme::refresh_row(modal_area), mouse.column, mouse.row) {
+                } else if matches!(&self.modal, Some(Modal::Appearance(form)) if form.refresh_selected)
+                    && contains(theme::refresh_row(modal_area), mouse.column, mouse.row)
+                {
                     if let Some(Modal::Appearance(form)) = self.modal.as_mut() {
                         form.refresh_selected = true;
                         form.pulse_selected = false;
@@ -1854,11 +1878,15 @@ impl App {
                     return Ok(());
                 }
             }
-            Modal::Appearance(form) => {
-                if self.appearance_key(form, key)? {
+            Modal::Appearance(form) => match self.appearance_key(form, key) {
+                Ok(true) => return Ok(()),
+                Ok(false) => {}
+                Err(error) => {
+                    form.error = Some(format!("Cannot save: {error}"));
+                    self.modal = Some(modal);
                     return Ok(());
                 }
-            }
+            },
             Modal::Preferences(form) => {
                 if self.preferences_key(form, key) {
                     if let Some(appearance) = &form.return_appearance {
@@ -1866,6 +1894,10 @@ impl App {
                     } else if let Some(theme) = form.return_theme {
                         self.modal = Some(Modal::Appearance(theme::Appearance {
                             theme,
+                            original_theme: self.theme,
+                            original_pulse_theme: theme::PulseTheme::load(&self.paths),
+                            return_usage: false,
+                            error: None,
                             pulse_theme: form.return_pulse_theme.unwrap_or_default(),
                             pulse_selected: form.return_pulse_selected,
                             refresh_selected: false,
@@ -2069,7 +2101,12 @@ impl App {
                     return Ok(());
                 }
                 let control = match key.code {
-                    KeyCode::Esc | KeyCode::Char('P') | KeyCode::Char('q') => return Ok(()),
+                    KeyCode::Esc | KeyCode::Char('P') | KeyCode::Char('q') => {
+                        if let Some(form) = &manager.return_appearance {
+                            self.modal = Some(Modal::Appearance(form.clone()));
+                        }
+                        return Ok(());
+                    }
                     KeyCode::Tab | KeyCode::Right | KeyCode::Down | KeyCode::Char('j' | 'l') => {
                         manager.move_selection(true);
                         None
@@ -2097,6 +2134,9 @@ impl App {
                         return Ok(());
                     }
                     if control == ProxyControl::Close {
+                        if let Some(form) = &manager.return_appearance {
+                            self.modal = Some(Modal::Appearance(form.clone()));
+                        }
                         return Ok(());
                     }
                     self.modal = Some(modal);

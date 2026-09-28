@@ -793,7 +793,11 @@ impl App {
             self.toggle_pi_proxy();
             return;
         }
-        let manager = ProxyManager::empty();
+        let mut manager = ProxyManager::empty();
+        manager.return_appearance = match &self.modal {
+            Some(Modal::Appearance(form)) => Some(form.clone()),
+            _ => None,
+        };
         self.modal = Some(Modal::Proxy(manager));
         self.start_proxy_action(ProxyControl::Refresh);
     }
@@ -814,7 +818,6 @@ impl App {
             ) {
                 self.handle_modal(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
             } else {
-                self.modal = None;
                 self.open_appearance();
             }
             return Ok(false);

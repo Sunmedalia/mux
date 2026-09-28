@@ -35,31 +35,39 @@ impl ClientTab {
 }
 
 pub(super) fn client_tabs(area: Rect) -> [(ClientTab, Rect); 6] {
-    let mut x = area.x.saturating_add(1);
-    let compact = area.width < 60;
-    [
+    let compact = area.width < 80;
+    let tabs = [
         (ClientTab::Claude, 11),
         (ClientTab::Codex, 9),
         (ClientTab::Pi, 5),
         (ClientTab::Grok, 8),
         (ClientTab::Usage, 8),
         (ClientTab::Settings, 12),
-    ]
-    .map(|(tab, width)| {
-        let width = if compact {
+    ];
+    let widths = tabs.map(|(tab, width)| {
+        if compact {
             tab.label().len() as u16
         } else {
             width
-        };
-        let right = area.right().saturating_sub(1);
+        }
+    });
+    // On narrow screens move Grok beside Usage so the centered name and all
+    // six full labels still fit on one row.
+    let split = if area.width < 46 { 3 } else { 4 };
+    let right_gap = u16::from(area.width >= 46);
+    let right_width = widths[split..].iter().sum::<u16>() + right_gap * (6 - split - 1) as u16;
+    let mut left = area.x.saturating_add(1);
+    let mut right = area.right().saturating_sub(right_gap + right_width);
+    std::array::from_fn(|index| {
+        let x = if index < split { &mut left } else { &mut right };
         let rect = Rect::new(
-            x,
+            *x,
             area.y,
-            width.min(right.saturating_sub(x)),
+            widths[index].min(area.right().saturating_sub(*x)),
             u16::from(area.height > 0),
         );
-        x = x.saturating_add(width + 1);
-        (tab, rect)
+        *x = x.saturating_add(widths[index] + if index < split { 1 } else { right_gap });
+        (tabs[index].0, rect)
     })
 }
 impl App {
@@ -174,6 +182,12 @@ impl App {
         }
     }
     pub(super) fn draw_client_tabs(&self, frame: &mut ratatui::Frame, area: Rect) {
+        frame.render_widget(
+            Paragraph::new("Mux")
+                .alignment(Alignment::Center)
+                .style(Style::default().fg(ROUTE).add_modifier(Modifier::BOLD)),
+            Rect::new(area.x, area.y, area.width, 1),
+        );
         for (tab, rect) in client_tabs(area) {
             let selected = self.client_tab() == tab;
             let style = if selected {

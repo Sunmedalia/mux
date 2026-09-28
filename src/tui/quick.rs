@@ -63,7 +63,8 @@ struct AgentSession {
 fn agent_session(pane: &serde_json::Value) -> Option<AgentSession> {
     let pane = pane.get("result").map_or(pane, |result| &result["pane"]);
     let session = &pane["agent_session"];
-    let client = match (pane["agent"].as_str()?, session["agent"].as_str()?) {
+    let agent = session["agent"].as_str()?;
+    let client = match (pane["agent"].as_str().unwrap_or(agent), agent) {
         ("codex", "codex") => "Codex",
         ("claude", "claude") => "Claude",
         ("grok", "grok") => "Grok",
@@ -72,13 +73,46 @@ fn agent_session(pane: &serde_json::Value) -> Option<AgentSession> {
     let value = session["value"].as_str()?;
     let id = match session["kind"].as_str()? {
         "id" => value,
-        "path" => std::path::Path::new(value).file_stem()?.to_str()?,
+        "path" => {
+            let path = std::path::Path::new(value);
+            // Rollout filenames contain timestamps and may include a resume suffix.
+            // The session metadata carries the actual thread ID.
+            let id = if client == "Codex" {
+                crate::sessions::id_from_log(path)?
+            } else {
+                path.file_stem()?.to_str()?.to_owned()
+            };
+            return Some(AgentSession { client, id });
+        }
         _ => return None,
     };
     (!id.is_empty()).then(|| AgentSession {
         client,
         id: id.into(),
     })
+}
+
+fn pane_session(pane: &serde_json::Value) -> Option<AgentSession> {
+    let reported = agent_session(pane);
+    if pane["agent"] != "codex"
+        || (pane["agent_session"]["agent"].is_string() && pane["agent_session"]["agent"] != "codex")
+    {
+        return reported;
+    }
+    // The daemon can keep reporting a different pane while this CLI changes
+    // threads. Its displayed name tracks the attached thread, even then.
+    let named = (|| {
+        let title = pane["terminal_title_stripped"].as_str()?;
+        let cwd = pane["foreground_cwd"]
+            .as_str()
+            .or_else(|| pane["cwd"].as_str())?;
+        let id = crate::sessions::codex_id_from_title(&crate::codex::home().ok()?, title, cwd)?;
+        Some(AgentSession {
+            client: "Codex",
+            id,
+        })
+    })();
+    named.or(reported)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -97,11 +131,15 @@ fn focused_agent(panes: &serde_json::Value, tab_id: &str) -> Option<FocusedAgent
                 return None;
             }
             let pane_id = pane["pane_id"].as_str()?;
-            let client = initial_client(pane["agent"].as_str());
+            let client = initial_client(
+                pane["agent"]
+                    .as_str()
+                    .or_else(|| pane["agent_session"]["agent"].as_str()),
+            );
             (client != 3).then(|| FocusedAgent {
                 pane_id: pane_id.into(),
                 client,
-                session: agent_session(pane),
+                session: pane_session(pane),
             })
         })
 }
@@ -132,11 +170,15 @@ fn focused_pane(
         return None;
     }
     let pane_id = pane["pane_id"].as_str()?;
-    let client = initial_client(pane["agent"].as_str());
+    let client = initial_client(
+        pane["agent"]
+            .as_str()
+            .or_else(|| pane["agent_session"]["agent"].as_str()),
+    );
     (client != 3).then(|| FocusedAgent {
         pane_id: pane_id.into(),
         client,
-        session: agent_session(pane),
+        session: pane_session(pane),
     })
 }
 
@@ -1570,7 +1612,7 @@ impl Monitor {
     fn draw_mini(&mut self, f: &mut ratatui::Frame, area: Rect) {
         if area.height < 4 {
             f.render_widget(
-                Paragraph::new(clipped("◈ Pulse · q close", area.width.into()))
+                Paragraph::new(clipped("q close", area.width.into()))
                     .style(Style::default().fg(BLUE)),
                 area,
             );
@@ -2568,7 +2610,7 @@ impl Monitor {
         self.roomy_visual = area.height >= 32;
         let inner = area.inner(Margin::new(2, 0));
         let title = if self.help {
-            "◈ Mux / HELP"
+            "◈ HELP"
         } else if self.sessions_mode {
             "◈ SESSIONS / ALL TIME"
         } else if self.chart_mode {
@@ -2622,9 +2664,11 @@ impl Monitor {
         self.scroll = self.scroll.min(self.limit);
         f.render_widget(Paragraph::new(content).scroll((self.scroll, 0)), body);
         if self.limit > 0 {
-            let mut state = ScrollbarState::new(usize::from(self.limit + body.height))
-                .position(usize::from(self.scroll))
-                .viewport_content_length(usize::from(body.height));
+            let mut state = scroll_state(
+                usize::from(self.limit) + usize::from(body.height),
+                usize::from(self.scroll),
+                usize::from(body.height),
+            );
             f.render_stateful_widget(
                 Scrollbar::new(ScrollbarOrientation::VerticalRight)
                     .begin_symbol(None)
@@ -2822,6 +2866,20 @@ fn focus_event_socket(path: &std::path::Path) -> Result<Box<dyn ReadWrite>> {
 trait ReadWrite: Read + Write {}
 impl<T: Read + Write> ReadWrite for T {}
 
+fn read_focus_subscription_response(reader: &mut impl BufRead) -> Result<()> {
+    let mut response = String::new();
+    anyhow::ensure!(
+        reader.read_line(&mut response)? > 0,
+        "Herdr subscription closed"
+    );
+    let response: serde_json::Value = serde_json::from_str(&response)?;
+    anyhow::ensure!(
+        response["result"].is_object(),
+        "Herdr subscription rejected"
+    );
+    Ok(())
+}
+
 fn follow_focus_events(
     tracker: &mut FocusTracker,
     send: &mpsc::SyncSender<FocusUpdate>,
@@ -2846,16 +2904,8 @@ fn follow_focus_events(
     socket.write_all(request.to_string().as_bytes())?;
     socket.write_all(b"\n")?;
     let mut reader = BufReader::new(socket);
+    read_focus_subscription_response(&mut reader)?;
     let mut line = String::new();
-    anyhow::ensure!(
-        reader.read_line(&mut line)? > 0,
-        "Herdr subscription closed"
-    );
-    let response: serde_json::Value = serde_json::from_str(&line)?;
-    anyhow::ensure!(
-        response["result"].is_object(),
-        "Herdr subscription rejected"
-    );
     if !tracker.observe(current_focus(workspace, tab, source), send, true) {
         return Ok(false);
     }
@@ -3444,6 +3494,97 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "read-only live check; set MUX_TEST_CODEX_PANE to the target pane"]
+    fn live_daemon_codex_session_has_tokens() {
+        let pane = std::env::var("MUX_TEST_CODEX_PANE").unwrap();
+        let result = herdr(&["pane", "get", &pane]).unwrap();
+        let current = pane_session(&result["result"]["pane"]).expect("identified session");
+        let snapshot = crate::sessions::Reader::default().read(&crate::sessions::roots().unwrap());
+        let session = snapshot
+            .rows
+            .iter()
+            .find(|row| row.client == current.client && row.id == current.id)
+            .expect("session log");
+        assert!(session.tokens.known && session.tokens.total() > 0);
+        println!(
+            "pane={pane} session={} total={} input={} output={}",
+            current.id,
+            session.tokens.total(),
+            session.tokens.input,
+            session.tokens.output
+        );
+    }
+
+    #[test]
+    fn subscription_ack_does_not_contaminate_the_first_focus_event() {
+        let messages = b"{\"id\":\"mux_focus\",\"result\":{}}\n{\"event\":\"pane_updated\",\"data\":{\"pane\":{\"pane_id\":\"source\",\"focused\":true,\"agent_session\":{\"agent\":\"codex\",\"kind\":\"id\",\"value\":\"thread-a\"}}}}\n";
+        let mut reader = std::io::Cursor::new(messages);
+        read_focus_subscription_response(&mut reader).unwrap();
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        let event = serde_json::from_str(&line).unwrap();
+        let focus = focus_from_event(&event, None, None, "source").unwrap();
+        assert_eq!(focus.session.unwrap().id, "thread-a");
+        assert!(
+            read_focus_subscription_response(&mut std::io::Cursor::new(b"{\"error\":{}}\n"))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn session_report_identifies_codex_when_process_detection_has_no_agent() {
+        let pane = json!({"pane_id":"source","tab_id":"tab","focused":true,
+            "agent_session":{"agent":"codex","kind":"id","value":"thread-a"}});
+        let focused = focused_pane(&pane, Some("tab"), "source").unwrap();
+        assert_eq!(focused.client, 1);
+        assert_eq!(focused.session.unwrap().id, "thread-a");
+        let panes = json!({"result":{"panes":[pane]}});
+        assert_eq!(
+            focused_agent(&panes, "tab").unwrap().session.unwrap().id,
+            "thread-a"
+        );
+    }
+
+    #[test]
+    fn codex_rollout_path_matches_session_tokens_and_incremental_updates() {
+        use std::io::Write;
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp
+            .path()
+            .join("rollout-2026-09-28T10-00-00-thread-a_resume.jsonl");
+        let mut file = std::fs::File::create(&path).unwrap();
+        writeln!(
+            file,
+            "{}",
+            json!({"type":"session_meta","payload":{"id":"thread-a"}})
+        )
+        .unwrap();
+        let pane = json!({"agent":"codex","agent_session":{
+            "agent":"codex","kind":"path","value":path}});
+        let mut monitor = Monitor {
+            active_session: agent_session(&pane),
+            ..Default::default()
+        };
+        assert_eq!(monitor.active_session.as_ref().unwrap().id, "thread-a");
+        let mut reader = crate::sessions::Reader::default();
+        for input in [100, 200] {
+            writeln!(
+                file,
+                "{}",
+                json!({"type":"event_msg","payload":{"type":"token_count",
+                "info":{"total_token_usage":{"input_tokens":input,"output_tokens":10}}}})
+            )
+            .unwrap();
+            file.flush().unwrap();
+            monitor.sessions = reader.read(&[(temp.path().to_owned(), false)]);
+            assert_eq!(monitor.active_row().unwrap().tokens.total(), input + 10);
+        }
+        let missing = json!({"agent":"codex","agent_session":{
+            "agent":"codex","kind":"path","value":temp.path().join("missing.jsonl")}});
+        assert!(agent_session(&missing).is_none());
+    }
+
+    #[test]
     fn source_agent_remains_visible_when_pulse_pane_is_focused() {
         let panes = json!({"result":{"panes":[
             {"pane_id":"source","tab_id":"tab","focused":false,"agent":"codex",
@@ -3990,6 +4131,40 @@ mod tests {
         assert!(text.contains("SESSION / TOKENS BY HOUR"));
         assert!(text.contains("120"));
         assert!(!text.contains("PROVIDERS / TODAY"));
+    }
+
+    #[test]
+    fn pulse_scrollbar_reaches_the_end_of_the_content() {
+        for (width, height) in [(32, 12), (48, 24), (80, 35)] {
+            let area = Rect::new(0, 0, width, height);
+            let mut monitor = Monitor {
+                source_pane: Some("source".into()),
+                ..Default::default()
+            };
+            monitor.sessions_mode = true;
+            monitor.sessions.rows = (0..50)
+                .map(|index| crate::sessions::Session {
+                    id: format!("session-{index}"),
+                    client: "Claude",
+                    project: "/work/mux".into(),
+                    ..Default::default()
+                })
+                .collect();
+            let mut terminal =
+                Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+            monitor.scroll = u16::MAX;
+            terminal.draw(|frame| monitor.draw(frame)).unwrap();
+            let body = content_body(area.inner(Margin::new(2, 0)));
+            assert!(monitor.limit > 0);
+            assert_eq!(monitor.scroll, monitor.limit);
+            let bottom = &terminal.backend().buffer()[(area.right() - 3, body.bottom() - 1)];
+            assert_eq!(bottom.fg, BLUE, "{width}x{height}: bottom of thumb");
+            let top: String = (0..width)
+                .map(|x| terminal.backend().buffer()[(x, 0)].symbol())
+                .collect();
+            assert!(top.contains("SESSIONS"));
+            assert!(!top.contains("Mux"));
+        }
     }
 
     #[test]

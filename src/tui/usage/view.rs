@@ -1951,9 +1951,8 @@ impl App {
             footer,
         );
         if limit > 0 && viewport.height > 0 {
-            let mut scrollbar_state = ScrollbarState::new(content_height)
-                .position(scroll)
-                .viewport_content_length(usize::from(viewport.height));
+            let mut scrollbar_state =
+                scroll_state(content_height, scroll, usize::from(viewport.height));
             frame.render_stateful_widget(
                 Scrollbar::new(ScrollbarOrientation::VerticalRight)
                     .begin_symbol(None)

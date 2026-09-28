@@ -2,12 +2,7 @@ use super::*;
 mod chart;
 mod view;
 pub(super) fn page_area(screen: Rect) -> Rect {
-    Rect::new(
-        screen.x,
-        screen.y.saturating_add(1),
-        screen.width,
-        screen.height.saturating_sub(1),
-    )
+    workspace_content_area(screen)
 }
 use crate::usage::{Query, Reader, Snapshot, Totals};
 use std::{

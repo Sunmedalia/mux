@@ -2,6 +2,158 @@ use super::*;
 use ratatui::{Terminal, backend::TestBackend};
 
 #[test]
+fn scrollbar_thumb_matches_viewport_and_reaches_both_ends() {
+    let area = Rect::new(0, 0, 8, 12);
+    let mut terminal = Terminal::new(TestBackend::new(8, 12)).unwrap();
+    for (position, edge) in [(0, 1), (30, 10), (usize::MAX, 10)] {
+        terminal
+            .draw(|frame| draw_scrollbar(frame, area, 40, position, 10))
+            .unwrap();
+        let thumb: Vec<_> = (1..11)
+            .filter(|y| terminal.backend().buffer()[(7, *y)].fg == ROUTE)
+            .collect();
+        assert!((2..=3).contains(&thumb.len()), "thumb={thumb:?}");
+        assert!(thumb.contains(&edge), "position={position} thumb={thumb:?}");
+    }
+    terminal
+        .draw(|frame| draw_scrollbar(frame, area, 10, 0, 10))
+        .unwrap();
+    assert!((1..11).all(|y| terminal.backend().buffer()[(7, y)].symbol() == " "));
+}
+
+#[test]
+fn settings_proxy_preserves_draft_and_save_returns_to_usage() {
+    let (_temp, mut app) = persisted_app();
+    let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+    app.usage.active = true;
+    app.open_appearance();
+    app.handle_key(key(KeyCode::Down)).unwrap();
+    app.handle_key(key(KeyCode::Tab)).unwrap();
+    app.handle_key(key(KeyCode::Down)).unwrap();
+    app.handle_key(key(KeyCode::Tab)).unwrap();
+    app.handle_key(key(KeyCode::Char('5'))).unwrap();
+    let Some(Modal::Appearance(expected)) = &app.modal else {
+        panic!()
+    };
+    let expected = expected.clone();
+    assert!(expected.dirty());
+    for back in [KeyCode::F(4), KeyCode::Esc, KeyCode::Char('P')] {
+        app.handle_key(key(KeyCode::Char('P'))).unwrap();
+        assert!(
+            matches!(&app.modal, Some(Modal::Proxy(manager)) if manager.return_appearance.is_some())
+        );
+        app.handle_key(key(back)).unwrap();
+        let Some(Modal::Appearance(actual)) = &app.modal else {
+            panic!("lost settings draft")
+        };
+        assert_eq!(actual.theme, expected.theme);
+        assert_eq!(actual.pulse_theme, expected.pulse_theme);
+        assert_eq!(actual.usage_refresh_secs, 30);
+        assert!(actual.refresh_selected && actual.dirty());
+    }
+    assert_eq!(app.config.usage_refresh_secs, 2);
+    app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
+        .unwrap();
+    assert!(app.modal.is_none() && app.usage.active);
+    assert_eq!(app.theme, expected.theme);
+    assert_eq!(
+        config::load(&app.paths.config).unwrap().usage_refresh_secs,
+        30
+    );
+}
+
+#[test]
+fn settings_save_conflict_keeps_the_draft_and_shows_the_error() {
+    let (_temp, mut app) = persisted_app();
+    let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+    app.open_appearance();
+    for code in [KeyCode::Tab, KeyCode::Tab, KeyCode::Right] {
+        app.handle_key(key(code)).unwrap();
+    }
+    config::update(&app.paths.config, |config| {
+        config.usage_refresh_secs = 30;
+        Ok(())
+    })
+    .unwrap();
+    app.handle_key(key(KeyCode::Enter)).unwrap();
+    assert!(
+        matches!(&app.modal, Some(Modal::Appearance(form)) if form.usage_refresh_secs == 3 && form.error.is_some())
+    );
+    assert_eq!(
+        config::load(&app.paths.config).unwrap().usage_refresh_secs,
+        30
+    );
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+    terminal.draw(|frame| app.draw(frame)).unwrap();
+    let text: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(text.contains("Cannot save") && text.contains("changed in another instance"));
+    app.handle_key(key(KeyCode::Esc)).unwrap();
+    assert!(app.modal.is_none());
+}
+
+#[test]
+fn settings_refresh_presets_mouse_bounds_and_cancel_are_consistent() {
+    let (_temp, mut app) = persisted_app();
+    let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+    app.usage.active = true;
+    app.open_appearance();
+    app.handle_key(key(KeyCode::Tab)).unwrap();
+    app.handle_key(key(KeyCode::Tab)).unwrap();
+    for (width, height) in [(40, 12), (80, 24), (120, 36)] {
+        let screen = Rect::new(0, 0, width, height);
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(text.contains("Usage refresh"));
+        assert!(!text.contains("Preview / providers"));
+        let top: String = (0..width)
+            .map(|x| terminal.backend().buffer()[(x, 0)].symbol())
+            .collect();
+        assert_eq!(top.find("Mux"), Some(usize::from((width - 2) / 2)));
+        let area = settings_page_area(screen);
+        let (_, rect) = theme::refresh_presets(area)[5];
+        app.handle_mouse(
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: rect.x,
+                row: rect.y,
+                modifiers: KeyModifiers::NONE,
+            },
+            screen,
+        )
+        .unwrap();
+        app.handle_key(key(KeyCode::Char('+'))).unwrap();
+        assert!(
+            matches!(&app.modal, Some(Modal::Appearance(form)) if form.usage_refresh_secs == 60)
+        );
+        app.handle_key(key(KeyCode::Char('1'))).unwrap();
+        app.handle_key(key(KeyCode::Char('-'))).unwrap();
+        assert!(
+            matches!(&app.modal, Some(Modal::Appearance(form)) if form.usage_refresh_secs == 1)
+        );
+    }
+    app.handle_key(key(KeyCode::Esc)).unwrap();
+    assert!(app.modal.is_none() && app.usage.active);
+    assert_eq!(app.config.usage_refresh_secs, 2);
+    assert_eq!(
+        config::load(&app.paths.config).unwrap().usage_refresh_secs,
+        2
+    );
+}
+
+#[test]
 fn fullscreen_visual_capture() {
     let directory = std::env::var("MUX_SCREENSHOT_DIR").ok();
     if let Some(directory) = &directory {
@@ -22,6 +174,8 @@ fn fullscreen_visual_capture() {
         } else if name.starts_with("grok") {
             assert!(text.contains("Grok accounts"));
             assert!(text.contains("Account configuration"));
+        } else if name.starts_with("settings-refresh") {
+            assert!(text.contains("Usage refresh"));
         } else if name.starts_with("settings") {
             assert!(text.contains("Preview / providers"));
         } else {
@@ -96,6 +250,14 @@ fn fullscreen_visual_capture() {
     let (_temp, mut settings) = persisted_app();
     settings.open_appearance();
     capture("settings-200x44", &mut settings, 200, 44);
+    settings
+        .handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+        .unwrap();
+    settings
+        .handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE))
+        .unwrap();
+    capture("settings-refresh-120x30", &mut settings, 120, 30);
+    capture("settings-refresh-40x12", &mut settings, 40, 12);
 }
 
 #[test]
@@ -207,6 +369,8 @@ fn usage_refresh_setting_saves_and_updates_usage_overview() {
     assert!(text.contains("/ 3s"), "{text}");
 
     app.handle_key(key(KeyCode::F(4))).unwrap();
+    app.handle_key(key(KeyCode::Tab)).unwrap();
+    app.handle_key(key(KeyCode::Tab)).unwrap();
     let mut small = Terminal::new(TestBackend::new(40, 12)).unwrap();
     small.draw(|frame| app.draw(frame)).unwrap();
     let compact = small
@@ -1185,6 +1349,7 @@ fn provider_page_keeps_global_sync_and_removes_duplicate_manager_controls() {
 fn proxy_manager_renders_and_supports_keyboard_and_mouse_navigation() {
     let mut app = interactive_test_app();
     app.modal = Some(Modal::Proxy(ProxyManager {
+        return_appearance: None,
         port_field: None,
         port_changed: false,
         instance: uuid::Uuid::new_v4(),
@@ -2827,7 +2992,7 @@ fn client_tabs_are_visible_and_highlighted_on_all_clients_at_minimum_size() {
                 let first_row = (0..width)
                     .map(|x| buffer[(x, 0)].symbol())
                     .collect::<String>();
-                for label in ["Claude", "Codex", "Pi", "Grok", "Usage"] {
+                for label in ["Claude", "Codex", "Pi", "Grok", "Usage", "Settings", "Mux"] {
                     assert!(first_row.contains(label));
                 }
                 for (candidate, rect) in client_tabs(Rect::new(0, 0, width, height)) {
@@ -4093,7 +4258,7 @@ fn grok_narrow_tabs_settings_discard_mouse_and_reconnect() {
         let row: String = (0..width)
             .map(|x| terminal.backend().buffer()[(x, 0)].symbol())
             .collect();
-        for label in ["Claude", "Codex", "Pi", "Grok", "Usage"] {
+        for label in ["Claude", "Codex", "Pi", "Grok", "Usage", "Settings", "Mux"] {
             assert!(row.contains(label), "{row}");
         }
     }

@@ -669,7 +669,7 @@ Arctic、Ember、Orchid 仅改变文字和方框配色，始终沿用终端背�
 
 已有主题 ID 和选择继续有效；Pulse 侧栏中的会话及输出读数随主题变化，真正的连接、成功、警告和错误保留独立语义。F4 预览使用真实厂商摘要和 Pulse 读数组件，可直接比较文字配色。
 
-按 **F4** 打开设置，`Tab` / `Shift+Tab` 或点击顶部标签切换 **Mux UI**、**Pulse pane**、**Refresh**。方向键或 `j/k` 选择主题或调整刷新间隔；宽屏左侧显示主题列表，右侧使用真实面板和表格样式预览示例数据，Pulse 预览独立于主界面主题。小屏自动使用紧凑列表或双列列表。`Enter` / Save 保存，`Esc` / Cancel 取消预览。Usage 刷新间隔默认为 **2 秒**，支持 **1–60 秒**，也可点击 `−` / `+` 调整。进入 Claude settings 再返回时会保留主题和刷新间隔草稿。
+按 **F4** 打开设置，`Tab` / `Shift+Tab` 或点击顶部标签切换 **Editor theme**、**Pulse theme**、**Refresh**。方向键或 `j/k` 选择主题或调整刷新间隔；宽屏左侧显示主题列表，右侧使用真实面板和表格样式预览示例数据，Pulse 预览独立于主界面主题。小屏自动使用紧凑列表或双列列表。`Enter` / Save 保存，`Esc` / Cancel 取消预览。Usage 刷新间隔默认为 **2 秒**，支持 **1–60 秒**，Refresh 页独立展示刷新间隔，支持点击或按 `1–6` 选择 1 / 2 / 5 / 10 / 30 / 60 秒，也可点击或按 `−` / `+` 调整。Display 与 Proxy 之间切换、进入 Claude settings 再返回时均保留主题和刷新间隔草稿；未保存的设置标为 unsaved。保存或取消后返回原来的 Usage / Provider 页面。
 
 主界面和 Pulse 主题分别保存在状态目录的 `tui-theme.json` 和 `pulse-theme.json`，刷新间隔保存在主配置的 `usage_refresh_secs`。下次启动自动恢复，运行中的 Pulse 会自动读取主题。保存外观和刷新设置不会触发代理同步。
 
@@ -800,7 +800,7 @@ Grok → Grok；未识别到这些 agent → All。打开后通过 Herdr 焦点�
 - 首页在 `PROVIDERS / TODAY` 标题右侧点击 `[Models m]`（或按 `m`）切换服务商与模型明细；不再使用 `d`。滚轮、方向键、PgUp/PgDn、鼠标点击或拖动滚动条均可滚动，Esc/Home 回到顶部。
 - **Codex** 页面顶部用紧凑账号卡显示名称、邮箱、套餐、本地登录状态及额度进度条。简洁版以紧凑额度条显示已用比例与相对重置时间，登录状态、账号数量和缓存年龄合并为一行；文字版保留完整字段。账号元数据每两秒更新；`r` 可在线刷新额度，Pulse 不切换账号。
 - **Grok** 页面顶部先显示账号卡、额度进度条和模型列表，再以独立的 Gateway token 区域显示今日**经过 Mux 本地代理**的 Grok 请求用量、输入/输出及缓存；Session token 区域显示 Grok 原生 `updates.jsonl` 中当前会话累计的 token、缓存读写和命中率，两者不相加。选择 API Provider 并重启 Grok 后，新请求才会记入 Gateway token；OAuth 和未通过 Mux 代理的旧直连请求不会计入该区域。账号卡显示 OAuth 账号、额度/重置时间/余额及模型配置。当前选择 Grok 时，每分钟自动刷新在线额度，`r` 立即刷新；失败保留同一账号缓存。`v` 在文字版与简洁版之间切换：文字版沿用 Claude 的完整网关指标、请求健康及服务商/模型明细，简洁版与 Codex、Claude 共用精细比例条。两版都显示网关输出速率（E2E）；Session 区域另显示原生日志的 API rate（有耗时记录的输出 token ÷ API 总耗时），不等同于纯模型解码速度，缺少有效耗时时显示 `—`。聚焦的 Grok session 优先；没有聚焦 Grok session 时显示最近一个有 token 的会话并标为 Recent；尚未写入 usage 时显示 `—`。
-- Claude / All 侧栏首页首屏先显示**今日 Mux 网关用量**，再显示当前聚焦的 Claude / Codex pane 的**当前 session 累计 token**；两者均用大数字展示，互不相加，各自保留输入/输出、缓存读写和缓存率。session 缓存复用率 = 缓存读取 ÷ 总输入（不含输出；缓存写入不算命中）。当前会话来自本地日志；文件变化会触发更新，并每 30 秒兜底检查一次。文件监听不可用时改为每 2 秒检查。Codex 恢复同一 session 时会合并多份日志的累计计数，避免新日志尚未写入 token 事件时用量暂时消失。`s` / `Sessions` 打开会话页，顶部保留当前会话摘要，下方显示其他本地会话；沿用 Claude / Codex / All 筛选。焦点切换到另一 agent pane 或 agent 切换 session 时，侧栏随之切换对应客户端和当前会话。若 Herdr 尚未提供 session ID，会显示等待识别，不会把最近的日志误标为当前会话。会话页按 `t` 切换最近活动 / token 排序，`r` 刷新，`?` 查看统计说明。Fork 会话标记 `*`，可能包含继承用量。
+- Claude / All 侧栏首页首屏先显示**今日 Mux 网关用量**，再显示当前聚焦的 Claude / Codex pane 的**当前 session 累计 token**；两者均用大数字展示，互不相加，各自保留输入/输出、缓存读写和缓存率。session 缓存复用率 = 缓存读取 ÷ 总输入（不含输出；缓存写入不算命中）。当前会话来自本地日志；文件变化会触发更新，并每 30 秒兜底检查一次。文件监听不可用时改为每 2 秒检查。Codex 恢复同一 session 时会合并多份日志的累计计数，避免新日志尚未写入 token 事件时用量暂时消失。`s` / `Sessions` 打开会话页，顶部保留当前会话摘要，下方显示其他本地会话；沿用 Claude / Codex / All 筛选。焦点切换到另一 agent pane 或 agent 切换 session 时，侧栏随之切换对应客户端和当前会话。若 Herdr 尚未提供 session ID，新版 Codex CLI 可按终端显示的会话名称和项目路径，从本地 `state_*.sqlite` 只读匹配唯一的未归档会话，以兼容共享 app-server 的 hook 上报到旧 pane 的情况；名称重复、缺少标题或数据库不兼容时仍显示等待识别，不会把最近的日志误标为当前会话。会话页按 `t` 切换最近活动 / token 排序，`r` 刷新，`?` 查看统计说明。Fork 会话标记 `*`，可能包含继承用量。
 - `c` / `Chart` 切换首页与图表页：上方为今日网关每小时请求数，下方为当前 session 今日每小时 token 增量（输入+输出，来自本地日志）；两组图分别缩放，不应直接比较柱高。
 - `v`（或点击右上角 `V(v)` / `T(v)`）在文字版和简洁图形版之间切换，当前页面、客户端筛选和排序保持不变。简洁版仍保留网关与当前 session 的大 Token 数字；网关指标改为输入/输出双色条、请求/未知计数、缓存命中条（内含 R/W 读写量）及速率/测量流数的紧凑读数，保留各项数值而减少重复标签。健康条按已完成请求分为绿色成功、红色失败、金色中断，待完成请求不计入比例。图表页原本就是图形展示，切换后图表数据不变。
 - `e` / `↗ Edit` 新开 Herdr 标签页运行完整 Mux，并立即切换到新标签页和编辑 pane；监控 pane 继续常驻。
@@ -852,4 +852,4 @@ Help 分类、顶部快捷操作和底部 Previous / Next / Back 均支持点击
 
 Provider 顶部与 Help 提供 **Disconnect [D]**：Claude 恢复接管前的设置，Codex 保留断开确认，Grok 恢复管理字段。Claude Preferences 原有 `Alt+X` 仍可使用；Pi 直接编辑本地文件，不提供 Disconnect。
 
-Claude、Codex、Pi、Grok、Usage、Settings 位于同一行。Proxy 是 Settings 内的功能，点击页内 `Proxy [P]` 进入，再按 `Esc` / `q` 返回外观设置。全屏时 Settings 与 Provider 的内容区域铺满终端宽度，外观预览随窗口扩展。Help 与 Back/Quit 在同一条页面操作栏，Back/Quit 位于最右侧：除根层外逐层返回，在 Provider 根层退出。Provider 工具栏不再显示 Models / Details；点击面板或按 `Tab` / `h` / `l` 切换。全屏选中 Codex / Grok 的 Account 时，左侧保留 Provider 列表，右侧复用账号页的账号列表、详情和完整操作按钮。窄窗口继续使用账号二级页。
+主 TUI 顶部同一行显示居中的 Mux 和 Claude、Codex、Pi、Grok、Usage、Settings 标签；Pulse 插件仅显示当前页面标题。滚动条按实际内容行数和视口比例显示，列表使用真实滚动偏移，滚到底时滑块到达轨道末端。Proxy 是 Settings 内的功能，点击页内 `Proxy [P]` 进入，再按 `Esc` / `q` 返回外观设置。全屏时 Settings 与 Provider 的内容区域铺满终端宽度，外观预览随窗口扩展。Help 与 Back/Quit 在同一条页面操作栏，Back/Quit 位于最右侧：除根层外逐层返回，在 Provider 根层退出。Provider 工具栏不再显示 Models / Details；点击面板或按 `Tab` / `h` / `l` 切换。全屏选中 Codex / Grok 的 Account 时，左侧保留 Provider 列表，右侧复用账号页的账号列表、详情和完整操作按钮。窄窗口继续使用账号二级页。

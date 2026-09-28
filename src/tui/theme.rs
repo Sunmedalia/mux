@@ -839,6 +839,10 @@ mod tests {
 #[derive(Clone)]
 pub(super) struct Appearance {
     pub theme: Theme,
+    pub original_theme: Theme,
+    pub original_pulse_theme: PulseTheme,
+    pub return_usage: bool,
+    pub error: Option<String>,
     pub pulse_theme: PulseTheme,
     pub pulse_selected: bool,
     pub refresh_selected: bool,
@@ -846,11 +850,30 @@ pub(super) struct Appearance {
     pub original_usage_refresh_secs: u64,
 }
 
+impl Appearance {
+    pub(super) fn dirty(&self) -> bool {
+        self.theme != self.original_theme
+            || self.pulse_theme != self.original_pulse_theme
+            || self.usage_refresh_secs != self.original_usage_refresh_secs
+    }
+}
+
 impl App {
     pub(super) fn open_appearance(&mut self) {
+        let return_usage = self.usage.active;
         self.usage.active = false;
+        if let Some(Modal::Proxy(manager)) = &self.modal
+            && let Some(form) = &manager.return_appearance
+        {
+            self.modal = Some(Modal::Appearance(form.clone()));
+            return;
+        }
         self.modal = Some(Modal::Appearance(Appearance {
             theme: self.theme,
+            original_theme: self.theme,
+            original_pulse_theme: PulseTheme::load(&self.paths),
+            return_usage,
+            error: None,
             pulse_theme: PulseTheme::load(&self.paths),
             pulse_selected: false,
             refresh_selected: false,
@@ -860,8 +883,12 @@ impl App {
     }
 
     pub(super) fn appearance_key(&mut self, form: &mut Appearance, key: KeyEvent) -> Result<bool> {
+        form.error = None;
         match key.code {
-            KeyCode::Esc => return Ok(true),
+            KeyCode::Esc => {
+                self.usage.active = form.return_usage;
+                return Ok(true);
+            }
             KeyCode::Enter | KeyCode::Char('s') => {
                 if form.usage_refresh_secs != form.original_usage_refresh_secs {
                     let value = form.usage_refresh_secs;
@@ -885,6 +912,7 @@ impl App {
                     form.usage_refresh_secs
                 );
                 self.status_error = false;
+                self.usage.active = form.return_usage;
                 return Ok(true);
             }
             KeyCode::Char('c')
@@ -902,6 +930,15 @@ impl App {
                     preferences.return_pulse_selected = form.pulse_selected;
                     return Ok(true);
                 }
+            }
+            KeyCode::Char(c @ '1'..='6') if form.refresh_selected => {
+                form.usage_refresh_secs = REFRESH_PRESETS[(c as u8 - b'1') as usize];
+            }
+            KeyCode::Char('-') if form.refresh_selected => {
+                form.usage_refresh_secs = form.usage_refresh_secs.saturating_sub(1).max(1);
+            }
+            KeyCode::Char('+') if form.refresh_selected => {
+                form.usage_refresh_secs = (form.usage_refresh_secs + 1).min(60);
             }
             KeyCode::Tab | KeyCode::BackTab | KeyCode::Char('p') => {
                 let current = if form.refresh_selected {
@@ -976,6 +1013,9 @@ pub(super) fn target_tabs(area: Rect) -> [Rect; 3] {
 }
 
 pub(super) fn rows(area: Rect, form: &Appearance) -> Vec<(usize, Rect)> {
+    if form.refresh_selected {
+        return vec![];
+    }
     let inner = panel_inner(area);
     let count = if form.pulse_selected {
         PulseTheme::ALL.len()
@@ -985,8 +1025,9 @@ pub(super) fn rows(area: Rect, form: &Appearance) -> Vec<(usize, Rect)> {
     let compact = area.height < 14;
     let columns = if compact { 2 } else { 1 };
     let start = inner.y + if compact { 1 } else { 2 };
-    let end = refresh_row(area)
-        .y
+    let end = area
+        .bottom()
+        .saturating_sub(3)
         .saturating_sub(if area.height >= 20 { 2 } else { 0 });
     let available = end.saturating_sub(start);
     let row_height = if gallery(area) && available as usize >= count * 2 {
@@ -1036,9 +1077,28 @@ pub(super) fn rows(area: Rect, form: &Appearance) -> Vec<(usize, Rect)> {
         .collect()
 }
 
+pub(super) const REFRESH_PRESETS: [u64; 6] = [1, 2, 5, 10, 30, 60];
+
+pub(super) fn refresh_presets(area: Rect) -> Vec<(u64, Rect)> {
+    let inner = panel_inner(area);
+    let y = inner.y + 4;
+    Layout::horizontal([Constraint::Ratio(1, 6); 6])
+        .split(Rect::new(inner.x, y, inner.width, 1))
+        .iter()
+        .copied()
+        .zip(REFRESH_PRESETS)
+        .map(|(rect, seconds)| (seconds, rect))
+        .collect()
+}
+
 pub(super) fn refresh_row(area: Rect) -> Rect {
     let inner = panel_inner(area);
-    Rect::new(inner.x, area.bottom().saturating_sub(3), inner.width, 1)
+    Rect::new(
+        inner.x,
+        (inner.y + 6).min(area.bottom().saturating_sub(3)),
+        inner.width,
+        1,
+    )
 }
 
 pub(super) fn refresh_buttons(area: Rect) -> [Rect; 2] {
@@ -1055,12 +1115,24 @@ pub(super) fn draw(
     form: &Appearance,
     client_settings: Option<&str>,
 ) {
-    frame.render_widget(panel(" Settings ", true), area);
+    frame.render_widget(
+        panel(
+            if area.width < 90 {
+                ""
+            } else if form.dirty() {
+                " Settings · unsaved "
+            } else {
+                " Settings "
+            },
+            true,
+        ),
+        area,
+    );
     frame.render_widget(
         Paragraph::new(if area.width < 90 {
-            "UI"
+            if form.dirty() { "UI *" } else { "UI" }
         } else {
-            "Appearance [F4]"
+            "Display [F4]"
         })
         .alignment(Alignment::Center)
         .style(button_style(true, false, false)),
@@ -1084,7 +1156,7 @@ pub(super) fn draw(
             _ => form.refresh_selected,
         };
         frame.render_widget(
-            Paragraph::new(["Mux UI", "Pulse pane", "Refresh"][index])
+            Paragraph::new(["Editor theme", "Pulse theme", "Refresh"][index])
                 .alignment(Alignment::Center)
                 .style(button_style(selected, false, false)),
             rect,
@@ -1092,8 +1164,12 @@ pub(super) fn draw(
     }
     if area.height >= 14 {
         frame.render_widget(
-            Paragraph::new("Tab target · ↑↓ theme / interval · Enter save · Esc cancel")
-                .style(Style::default().fg(MUTED)),
+            Paragraph::new(if form.refresh_selected {
+                "Tab section · ←/→ interval · 1–6 presets · Enter save"
+            } else {
+                "Tab section · ↑/↓ theme · Enter save · Esc cancel"
+            })
+            .style(Style::default().fg(MUTED)),
             Rect::new(inner.x, inner.y + 1, inner.width, 1),
         );
     }
@@ -1138,40 +1214,82 @@ pub(super) fn draw(
             rect,
         );
     }
-    let row = refresh_row(area);
+    let row = if form.refresh_selected {
+        refresh_row(area)
+    } else {
+        Rect::new(inner.x, area.bottom().saturating_sub(3), inner.width, 1)
+    };
     frame.render_widget(Clear, row);
-    frame.render_widget(
-        Paragraph::new(format!(
-            " {}Usage refresh  {}s",
-            if form.refresh_selected { "● " } else { "" },
-            form.usage_refresh_secs
-        ))
-        .style(
-            Style::default()
-                .fg(if form.refresh_selected { ROUTE } else { MUTED })
-                .bg(SURFACE),
-        ),
-        row,
-    );
-    for (index, rect) in refresh_buttons(area).into_iter().enumerate() {
+    if form.refresh_selected {
+        let start = inner.y + 2;
         frame.render_widget(
-            Paragraph::new(if index == 0 { " − " } else { " + " }).style(button_style(
-                form.refresh_selected,
-                false,
-                false,
-            )),
+            Paragraph::new("Usage page · refresh interval").style(Style::default().fg(FIELD_LABEL)),
+            Rect::new(inner.x, start, inner.width, 1),
+        );
+        for (index, (seconds, rect)) in refresh_presets(area).into_iter().enumerate() {
+            let label = if rect.width >= 8 {
+                format!("{seconds}s [{}]", index + 1)
+            } else {
+                format!("{seconds}s")
+            };
+            frame.render_widget(
+                Paragraph::new(label)
+                    .alignment(Alignment::Center)
+                    .style(button_style(
+                        seconds == form.usage_refresh_secs,
+                        false,
+                        false,
+                    )),
+                rect,
+            );
+        }
+        if area.height >= 18 {
+            frame.render_widget(
+                Paragraph::new("Shorter intervals update Usage more often.\nPulse follows session changes automatically.")
+                    .style(Style::default().fg(MUTED)).wrap(Wrap { trim: false }),
+                Rect::new(inner.x, start + 5, inner.width, 3),
+            );
+        }
+        frame.render_widget(
+            Paragraph::new(format!("Usage refresh  {}s", form.usage_refresh_secs))
+                .style(Style::default().fg(ROUTE).bg(SURFACE)),
+            row,
+        );
+        for (index, rect) in refresh_buttons(area).into_iter().enumerate() {
+            frame.render_widget(
+                Paragraph::new(if index == 0 { " − " } else { " + " }).style(button_style(
+                    true,
+                    form.usage_refresh_secs == if index == 0 { 1 } else { 60 },
+                    false,
+                )),
+                rect,
+            );
+        }
+    } else {
+        frame.render_widget(
+            Paragraph::new(if form.pulse_selected {
+                "Preview · Pulse pane only"
+            } else {
+                "Preview · editor only"
+            })
+            .style(Style::default().fg(MUTED)),
+            row,
+        );
+    }
+    if let Some(error) = &form.error {
+        let rect = Rect::new(inner.x, area.bottom().saturating_sub(4), inner.width, 1);
+        frame.render_widget(Clear, rect);
+        frame.render_widget(
+            Paragraph::new(error.as_str()).style(Style::default().fg(ERROR)),
             rect,
         );
     }
-    if area.height >= 20 {
-        frame.render_widget(
-            Paragraph::new("Live preview · saves both themes and the 1–60s refresh interval")
-                .style(Style::default().fg(MUTED)),
-            Rect::new(inner.x, row.y - 2, inner.width, 1),
-        );
-    }
     let buttons = if let Some(label) = client_settings {
-        vec!["Save", label, "Cancel"]
+        vec![
+            "Save",
+            if area.width < 64 { "Client c" } else { label },
+            "Cancel",
+        ]
     } else {
         vec!["Save", "Cancel"]
     };
@@ -1181,7 +1299,7 @@ pub(super) fn draw(
 // Render after the surrounding UI has been themed, so the Pulse preview is
 // independent of the selected Mux theme and all previews use real components.
 pub(super) fn draw_preview(frame: &mut ratatui::Frame, area: Rect, form: &Appearance) {
-    if !gallery(area) {
+    if !gallery(area) || form.refresh_selected {
         return;
     }
     let inner = panel_inner(area);

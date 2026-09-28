@@ -45,6 +45,7 @@ impl ProxyManager {
 
     pub(super) fn empty() -> Self {
         Self {
+            return_appearance: None,
             instance: uuid::Uuid::new_v4(),
             port_field: None,
             port_changed: false,
@@ -1443,12 +1444,23 @@ pub(super) fn draw_proxy_manager(
         draw_modal_buttons(frame, area, &["Save port", "Cancel"]);
         return;
     }
-    frame.render_widget(panel(" Settings ", true), area);
+    frame.render_widget(
+        panel(if area.width < 90 { "" } else { " Settings " }, true),
+        area,
+    );
     frame.render_widget(
         Paragraph::new(if area.width < 90 {
-            "UI"
+            if manager
+                .return_appearance
+                .as_ref()
+                .is_some_and(|form| form.dirty())
+            {
+                "UI *"
+            } else {
+                "UI"
+            }
         } else {
-            "Appearance [F4]"
+            "Display [F4]"
         })
         .alignment(Alignment::Center)
         .style(button_style(false, false, false)),

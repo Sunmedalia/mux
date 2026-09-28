@@ -546,6 +546,69 @@ fn discover(
     }
 }
 
+/// Resolve an explicitly reported session log without reading conversation bodies.
+pub fn id_from_log(path: &Path) -> Option<String> {
+    let file = File::open(path).ok()?;
+    let mut reader = BufReader::new(file);
+    let mut line = Vec::new();
+    reader
+        .by_ref()
+        .take(64 * 1024)
+        .read_until(b'\n', &mut line)
+        .ok()?;
+    let record: Value = serde_json::from_slice(&line).ok()?;
+    let id = if record["type"] == "session_meta" {
+        record["payload"]["id"]
+            .as_str()
+            .or_else(|| record["payload"]["session_id"].as_str())
+    } else {
+        record["sessionId"].as_str()
+    }?;
+    (!id.is_empty()).then(|| id.to_owned())
+}
+
+/// Recover a daemon-backed CLI session only when its displayed name and cwd
+/// identify exactly one unarchived thread. Never guess from log recency.
+pub fn codex_id_from_title(home: &Path, title: &str, cwd: &str) -> Option<String> {
+    let project = Path::new(cwd).file_name()?.to_str()?;
+    let suffix = format!(" | {project}");
+    let name = title.strip_suffix(&suffix)?;
+    if name.is_empty() {
+        return None;
+    }
+    let database = fs::read_dir(home)
+        .ok()?
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let file = entry.file_name();
+            let version = file
+                .to_str()?
+                .strip_prefix("state_")?
+                .strip_suffix(".sqlite")?
+                .parse::<u32>()
+                .ok()?;
+            Some((version, entry.path()))
+        })
+        .max_by_key(|(version, _)| *version)?
+        .1;
+    let db =
+        rusqlite::Connection::open_with_flags(database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .ok()?;
+    db.busy_timeout(std::time::Duration::from_millis(100))
+        .ok()?;
+    let mut statement = db
+        .prepare("SELECT id FROM threads WHERE cwd = ?1 AND name = ?2 AND archived = 0 LIMIT 2")
+        .ok()?;
+    let ids = statement
+        .query_map(rusqlite::params![cwd, name], |row| row.get::<_, String>(0))
+        .ok()?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .ok()?;
+    (ids.len() == 1)
+        .then(|| ids[0].clone())
+        .filter(|id| !id.is_empty())
+}
+
 pub fn roots() -> anyhow::Result<Vec<(PathBuf, bool)>> {
     let claude = crate::claude_config::settings_path()?;
     let codex = crate::codex::home()?;
@@ -562,6 +625,46 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::io::Write;
+
+    #[test]
+    fn codex_daemon_title_requires_a_unique_active_name_and_project() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = rusqlite::Connection::open(temp.path().join("state_5.sqlite")).unwrap();
+        db.execute_batch(
+            "CREATE TABLE threads (id TEXT, name TEXT, cwd TEXT, archived INTEGER);
+            INSERT INTO threads VALUES ('thread-a','Fix session tokens','/work/mux',0);
+            INSERT INTO threads VALUES ('other-project','Fix session tokens','/other/mux',0);
+            INSERT INTO threads VALUES ('old','Fix session tokens','/work/mux',1);",
+        )
+        .unwrap();
+        let resolve = |title, cwd| codex_id_from_title(temp.path(), title, cwd);
+        assert_eq!(
+            resolve("Fix session tokens | mux", "/work/mux").as_deref(),
+            Some("thread-a")
+        );
+        assert_eq!(
+            resolve("Fix session tokens | mux", "/other/mux").as_deref(),
+            Some("other-project")
+        );
+        assert!(resolve("Different session | mux", "/work/mux").is_none());
+        assert!(resolve("Fix session tokens | other", "/work/mux").is_none());
+        db.execute(
+            "INSERT INTO threads VALUES ('duplicate','Fix session tokens','/work/mux',0)",
+            [],
+        )
+        .unwrap();
+        assert!(resolve("Fix session tokens | mux", "/work/mux").is_none());
+        db.execute("UPDATE threads SET name='Renamed' WHERE id='thread-a'", [])
+            .unwrap();
+        assert_eq!(
+            resolve("Renamed | mux", "/work/mux").as_deref(),
+            Some("thread-a")
+        );
+        assert!(
+            codex_id_from_title(&temp.path().join("missing"), "Renamed | mux", "/work/mux")
+                .is_none()
+        );
+    }
 
     #[test]
     fn grok_prompt_usage_is_incremental_deduplicated_and_cache_inclusive() {

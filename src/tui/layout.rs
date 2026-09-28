@@ -145,12 +145,7 @@ pub(super) struct ProviderPageLayout {
 
 impl App {
     pub(super) fn provider_page_layout(&self, area: Rect) -> ProviderPageLayout {
-        let shell = Rect::new(
-            area.x,
-            area.y + 1,
-            area.width,
-            area.height.saturating_sub(1),
-        );
+        let shell = workspace_content_area(area);
         let mut inner = panel_inner(shell);
         if inner.width >= 60 {
             inner.x += 1;
@@ -173,9 +168,11 @@ impl App {
         });
         let mut rows: Vec<Vec<(FooterControl, u16)>> = vec![vec![]];
         let mut used = 0;
-        let reserve = (UnicodeWidthStr::width("Help [?]")
-            + UnicodeWidthStr::width("Back [Esc/q]")
-            + 7) as u16;
+        let reserve = if area.height < 16 {
+            0
+        } else {
+            (UnicodeWidthStr::width("Help [?]") + UnicodeWidthStr::width("Back [Esc/q]") + 7) as u16
+        };
         for control in actions {
             let width =
                 (UnicodeWidthStr::width(self.provider_action_text(control).as_str()) as u16 + 2)
@@ -665,6 +662,16 @@ pub(super) fn draw_modal_buttons(frame: &mut ratatui::Frame, area: Rect, labels:
     }
 }
 
+// Ratatui 0.29 expects the number of possible viewport positions, including
+// the last one; it adds the viewport size when computing the thumb ratio.
+pub(super) fn scroll_state(length: usize, position: usize, visible: usize) -> ScrollbarState {
+    let visible = visible.max(1);
+    let limit = length.saturating_sub(visible);
+    ScrollbarState::new(limit.saturating_add(1))
+        .position(position.min(limit))
+        .viewport_content_length(visible)
+}
+
 pub(super) fn draw_scrollbar(
     frame: &mut ratatui::Frame,
     area: Rect,
@@ -675,9 +682,11 @@ pub(super) fn draw_scrollbar(
     if length <= visible.max(1) || area.height <= 2 {
         return;
     }
-    let mut state = ScrollbarState::new(length).position(position);
+    let mut state = scroll_state(length, position, visible);
     frame.render_stateful_widget(
         Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(None)
+            .end_symbol(None)
             .thumb_style(Style::default().fg(ROUTE))
             .track_style(Style::default().fg(Color::DarkGray)),
         area.inner(Margin {
@@ -955,6 +964,14 @@ pub(super) fn unique_profile_id(base: &str, profiles: &BTreeMap<String, Profile>
 
 /// Full-width account pages place the list beside the selected account details.
 pub(super) fn account_page_rows(area: Rect, login_busy: bool) -> [Rect; 4] {
+    account_page_rows_with_footer(area, login_busy, 3)
+}
+
+pub(super) fn account_page_rows_with_footer(
+    area: Rect,
+    login_busy: bool,
+    footer_height: u16,
+) -> [Rect; 4] {
     let header_height = if area.height < 16 {
         2
     } else if login_busy {
@@ -962,7 +979,6 @@ pub(super) fn account_page_rows(area: Rect, login_busy: bool) -> [Rect; 4] {
     } else {
         4
     };
-    let footer_height = 3;
     let content_y = area.y + header_height;
     let content_height = area.height.saturating_sub(header_height + footer_height);
     let header = Rect::new(area.x, area.y, area.width, header_height);
@@ -986,7 +1002,7 @@ pub(super) fn account_page_rows(area: Rect, login_busy: bool) -> [Rect; 4] {
         let list_height = if login_busy {
             0
         } else if area.height < 16 {
-            3
+            2
         } else {
             content_height * 2 / 5
         };
@@ -1002,8 +1018,16 @@ pub(super) fn account_page_rows(area: Rect, login_busy: bool) -> [Rect; 4] {
 }
 
 pub(super) fn embedded_account_rows(area: Rect, login_busy: bool) -> [Rect; 4] {
+    embedded_account_rows_with_footer(area, login_busy, 3)
+}
+
+pub(super) fn embedded_account_rows_with_footer(
+    area: Rect,
+    login_busy: bool,
+    footer_height: u16,
+) -> [Rect; 4] {
     let header_height = 3.min(area.height);
-    let footer_height = 3.min(area.height.saturating_sub(header_height));
+    let footer_height = footer_height.min(area.height.saturating_sub(header_height));
     let content_y = area.y.saturating_add(header_height);
     let content_height = area.height.saturating_sub(header_height + footer_height);
     let list_width = if login_busy {
