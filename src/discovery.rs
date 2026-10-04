@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, OpenOptions},
-    io::Write,
+    io::{Read, Write},
     path::Path,
     time::Duration,
 };
@@ -28,6 +28,9 @@ pub struct CachedModels {
     pub fetched_at: u64,
     pub models: Vec<ModelEntry>,
 }
+
+const CATALOG_LIMIT: usize = 8 * 1024 * 1024;
+const MAX_MODELS: usize = 10_000;
 
 pub fn discover(profile: &Profile) -> Result<Vec<ModelEntry>> {
     if !profile.enabled {
@@ -58,15 +61,28 @@ fn discover_with_client(client: &Client, profile: &Profile) -> Result<Vec<ModelE
         Credential::ApiKey { value } => request.header("api-key", value),
         Credential::None => request,
     };
-    let response = request.send().context("model discovery request failed")?;
+    let response = request
+        .send()
+        .map_err(|_| anyhow::anyhow!("model discovery connection failed or timed out"))?;
     let status = response.status();
-    let bytes = response
-        .bytes()
-        .context("model discovery response could not be read")?;
+    let limit = if status.is_success() {
+        CATALOG_LIMIT
+    } else {
+        16 * 1024
+    };
+    let mut bytes = Vec::new();
+    response
+        .take((limit + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|_| anyhow::anyhow!("model discovery response could not be read"))?;
     if !status.is_success() {
-        let limit = bytes.len().min(2048);
-        let detail = String::from_utf8_lossy(&bytes[..limit]);
+        bytes.truncate(limit);
+        let detail = crate::diagnostics::detail(&bytes, &profile.credential, "")
+            .unwrap_or_else(|| "check credentials and models URL".into());
         bail!("model discovery returned HTTP {status}: {detail}");
+    }
+    if bytes.len() > limit {
+        bail!("model catalog exceeds 8 MiB; previous cache retained");
     }
     let value: Value =
         serde_json::from_slice(&bytes).context("model discovery returned invalid JSON")?;
@@ -80,6 +96,9 @@ pub fn parse_models(value: &Value) -> Result<Vec<ModelEntry>> {
         .or_else(|| value.as_array().map(|_| value))
         .and_then(Value::as_array)
         .context("response has neither a data nor models array")?;
+    if rows.len() > MAX_MODELS {
+        bail!("model catalog exceeds 10,000 entries; previous cache retained");
+    }
     let mut models = Vec::new();
     for row in rows {
         let Some(id) = row
@@ -100,6 +119,12 @@ pub fn parse_models(value: &Value) -> Result<Vec<ModelEntry>> {
             .get("description")
             .and_then(Value::as_str)
             .map(str::to_owned);
+        if id.len() > 1024
+            || label.as_ref().is_some_and(|s| s.len() > 1024)
+            || description.as_ref().is_some_and(|s| s.len() > 8192)
+        {
+            bail!("model catalog field exceeds its size limit; previous cache retained");
+        }
         models.push(ModelEntry {
             max_output_tokens: None,
             context_window: None,
@@ -931,5 +956,21 @@ mod tests {
         assert_eq!(ids, ["model-a", "manual-x", "model-c"]);
         assert_eq!(configured[0].label.as_deref(), Some("Discovered model-a"));
         assert_eq!(configured[1].label.as_deref(), Some("Manual X"));
+    }
+}
+
+#[cfg(test)]
+mod catalog_limit_tests {
+    use super::*;
+    use serde_json::json;
+    #[test]
+    fn model_count_and_utf8_field_size_boundaries() {
+        assert!(parse_models(&json!({"data":vec![json!("m");MAX_MODELS]})).is_ok());
+        assert!(parse_models(&json!({"data":vec![json!("m");MAX_MODELS+1]})).is_err());
+        assert!(parse_models(&json!({"data":[{"id":"x".repeat(1024),"display_name":"n".repeat(1024),"description":"d".repeat(8192)}]})).is_ok());
+        assert!(parse_models(&json!({"data":[{"id":"中".repeat(342)}]})).is_err());
+        assert!(
+            parse_models(&json!({"data":[{"id":"m","description":"x".repeat(8193)}]})).is_err()
+        );
     }
 }

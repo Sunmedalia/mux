@@ -13,6 +13,7 @@ mod models;
 mod pi;
 mod preferences;
 mod quick;
+mod settings;
 mod state;
 mod tabs;
 #[cfg(test)]
@@ -28,6 +29,7 @@ use help::*;
 use layout::*;
 use models::*;
 use preferences::*;
+use settings::*;
 use state::*;
 use tabs::*;
 
@@ -118,6 +120,7 @@ pub struct App {
     status: String,
     status_error: bool,
     modal: Option<Modal>,
+    settings_menu: Option<SettingsMenu>,
     help_return: Option<Box<Modal>>,
     proxy_status: Option<proxy::ProxyStatus>,
     provider_editor: Option<RouteEditor>,
@@ -151,6 +154,7 @@ pub fn run(paths: AppPaths, config: Config, import: Option<ImportCandidate>) -> 
         status: "↑↓ Select · Space toggle provider · Enter open".into(),
         status_error: false,
         modal: None,
+        settings_menu: None,
         help_return: None,
         proxy_status,
         provider_editor: None,

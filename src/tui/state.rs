@@ -63,6 +63,7 @@ pub(super) enum ShowcaseControl {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ProxyControl {
+    Resources,
     Port,
     Start,
     Stop,
@@ -74,6 +75,9 @@ pub(super) enum ProxyControl {
 
 #[derive(Clone)]
 pub(super) enum Modal {
+    SettingsMenu(SettingsMenu),
+    UiOptions(UiOptions),
+    CodexSettings(CodexSettings),
     Grok(Box<grok::Dialog>),
     Appearance(theme::Appearance),
     Preferences(PreferencesForm),
@@ -193,6 +197,9 @@ impl HelpModal {
 pub(super) struct ProxyManager {
     pub(super) return_appearance: Option<theme::Appearance>,
     pub(super) port_field: Option<FormField>,
+    pub(super) resource_fields: Option<Vec<FormField>>,
+    pub(super) resource_original: Option<config::ProxyResources>,
+    pub(super) resource_selected: usize,
     pub(super) port_changed: bool,
     pub(super) instance: uuid::Uuid,
     pub(super) runtime: Option<proxy::ProxyStatus>,

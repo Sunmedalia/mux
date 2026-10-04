@@ -601,7 +601,10 @@ pub(super) fn modal_area(screen: Rect) -> Rect {
 
 pub(super) fn modal_area_for(modal: &Modal, screen: Rect) -> Rect {
     match modal {
-        Modal::Appearance(_) => settings_page_area(screen),
+        Modal::Appearance(_)
+        | Modal::SettingsMenu(_)
+        | Modal::UiOptions(_)
+        | Modal::CodexSettings(_) => settings_page_area(screen),
         Modal::Help(_) => centered_rect(
             104.min(screen.width.saturating_sub(2)),
             32.min(screen.height.saturating_sub(2)),

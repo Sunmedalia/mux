@@ -90,7 +90,7 @@ fn save(paths: &AppPaths, state: &State) -> Result<()> {
 // Change detection only, never used for authentication or integrity verification.
 fn revision(config: &Config) -> Result<u64> {
     let mut hash = DefaultHasher::new();
-    serde_json::to_vec(config)?.hash(&mut hash);
+    serde_json::to_vec(&(config.version, &config.profiles, &config.claude))?.hash(&mut hash);
     Ok(hash.finish())
 }
 fn matches(binding: &Binding, value: &Value) -> bool {
@@ -875,5 +875,22 @@ default_model = "model-z"
                 .unwrap()
                 .contains("/r/")
         );
+    }
+}
+
+#[cfg(test)]
+mod revision_tests {
+    use super::*;
+    #[test]
+    fn only_claude_changes_invalidate_revision() {
+        let mut config = Config::default();
+        let before = revision(&config).unwrap();
+        config.ui.pulse_visual = true;
+        config.usage_refresh_secs = 10;
+        config.codex.reasoning_effort = Some("high".into());
+        config.proxy.max_inflight = 8;
+        assert_eq!(revision(&config).unwrap(), before);
+        config.claude.hide_attribution = Some(true);
+        assert_ne!(revision(&config).unwrap(), before);
     }
 }

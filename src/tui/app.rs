@@ -569,9 +569,22 @@ impl App {
             .and_then(|id| self.cache.profiles.get(&id).map(|c| c.models.clone()))
             .unwrap_or_default();
         let mut form = ModelForm::with_api_models(cached);
-        if self.client_tab() == ClientTab::Claude {
+        if self.client_tab() == ClientTab::Claude && self.config.ui.claude_new_model_1m {
             form.default_one_m = true;
             form.fields[3].value = "true".into();
+        }
+        if let Some(enable) = form
+            .fields
+            .iter_mut()
+            .find(|field| field.label == "Enable now")
+        {
+            enable.value = match self.client_tab() {
+                ClientTab::Claude => self.config.ui.claude_new_model_enabled,
+                ClientTab::Codex => self.config.ui.codex_new_model_enabled,
+                ClientTab::Grok => self.config.ui.grok_new_model_enabled,
+                _ => true,
+            }
+            .to_string();
         }
         if self.pi_enabled {
             form.fields
@@ -789,7 +802,10 @@ impl App {
 
     pub(super) fn open_proxy_manager(&mut self) {
         self.usage.active = false;
-        if self.pi_enabled && !matches!(self.modal, Some(Modal::Appearance(_) | Modal::Proxy(_))) {
+        if self.pi_enabled
+            && self.settings_menu.is_none()
+            && !matches!(self.modal, Some(Modal::Appearance(_) | Modal::Proxy(_)))
+        {
             self.toggle_pi_proxy();
             return;
         }
@@ -814,11 +830,17 @@ impl App {
     pub(super) fn back_one_level(&mut self) -> Result<bool> {
         if matches!(self.modal, Some(Modal::Proxy(_))) {
             if self.modal.as_ref().is_some_and(
-                |modal| matches!(modal, Modal::Proxy(manager) if manager.port_field.is_some()),
+                |modal| matches!(modal, Modal::Proxy(manager) if manager.port_field.is_some() || manager.resource_fields.is_some()),
             ) {
                 self.handle_modal(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))?;
             } else {
-                self.open_appearance();
+                if self.modal.as_ref().is_some_and(|modal| matches!(modal, Modal::Proxy(manager) if manager.return_appearance.is_some())) {
+                    self.open_appearance();
+                } else if self.settings_menu.is_some() {
+                    self.return_settings_menu();
+                } else {
+                    self.open_appearance();
+                }
             }
             return Ok(false);
         }

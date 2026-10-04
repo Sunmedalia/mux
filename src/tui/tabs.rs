@@ -72,7 +72,19 @@ pub(super) fn client_tabs(area: Rect) -> [(ClientTab, Rect); 6] {
 }
 impl App {
     pub(super) fn client_tab(&self) -> ClientTab {
-        if matches!(self.modal, Some(Modal::Appearance(_) | Modal::Proxy(_))) {
+        if self.settings_menu.is_some() {
+            return ClientTab::Settings;
+        }
+        if matches!(
+            self.modal,
+            Some(
+                Modal::Appearance(_)
+                    | Modal::Proxy(_)
+                    | Modal::SettingsMenu(_)
+                    | Modal::UiOptions(_)
+                    | Modal::CodexSettings(_)
+            )
+        ) {
             return ClientTab::Settings;
         }
         if matches!(self.modal, Some(Modal::Help(_))) && self.help_return.is_some() {
@@ -95,19 +107,49 @@ impl App {
         }
     }
     pub(super) fn select_client_tab(&mut self, tab: ClientTab) {
+        if self.settings_menu.as_ref().is_some_and(SettingsMenu::dirty)
+            && tab != ClientTab::Settings
+        {
+            if let Some(menu) = &mut self.settings_menu {
+                menu.message = Some("Unsaved · Ctrl+S save · Ctrl+R discard".into());
+            }
+            if let Some(Modal::SettingsMenu(menu)) = &mut self.modal {
+                menu.message = Some("Unsaved · Ctrl+S save · Ctrl+R discard".into());
+            }
+            return;
+        }
         if (self.modal.is_some()
-            && !matches!(self.modal, Some(Modal::Appearance(_) | Modal::Proxy(_))))
+            && !matches!(
+                self.modal,
+                Some(
+                    Modal::Appearance(_)
+                        | Modal::Proxy(_)
+                        | Modal::SettingsMenu(_)
+                        | Modal::UiOptions(_)
+                        | Modal::CodexSettings(_)
+                )
+            ))
             || self.codex_navigation_blocked()
             || self.grok_auth.busy
             || tab == self.client_tab()
         {
             return;
         }
-        if matches!(self.modal, Some(Modal::Appearance(_) | Modal::Proxy(_))) {
+        if matches!(
+            self.modal,
+            Some(
+                Modal::Appearance(_)
+                    | Modal::Proxy(_)
+                    | Modal::SettingsMenu(_)
+                    | Modal::UiOptions(_)
+                    | Modal::CodexSettings(_)
+            )
+        ) {
             self.modal = None;
+            self.settings_menu = None;
         }
         if tab == ClientTab::Settings {
-            self.open_appearance();
+            self.open_settings_menu();
             return;
         }
         if tab == ClientTab::Usage {
@@ -145,6 +187,7 @@ impl App {
         };
         if tab == ClientTab::Pi {
             config.usage_refresh_secs = self.config.usage_refresh_secs;
+            config.ui = self.config.ui.clone();
         }
         self.config = config;
         self.usage.active = false;

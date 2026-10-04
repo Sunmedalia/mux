@@ -9,6 +9,16 @@ pub(super) struct SyncRequest {
     explicit: bool,
     preferred: Option<String>,
 }
+#[derive(Clone)]
+enum TaskKind {
+    Test,
+    ProfileDiscover(uuid::Uuid),
+    Discover(String, u64),
+    Inspect,
+    Sync,
+    Proxy,
+}
+
 enum Completion {
     ConnectionTest(uuid::Uuid, Result<(u16, u128)>),
     ModelTest {
@@ -35,13 +45,15 @@ enum Completion {
         Option<proxy::ProxyStatus>,
     ),
     Proxy(Box<ProxyManager>),
-    Panicked,
+    Panicked(TaskKind),
+    Finished(uuid::Uuid, Box<Completion>),
 }
 pub(super) struct Background {
     sender: Sender<Completion>,
     receiver: Receiver<Completion>,
     requests: BTreeMap<String, u64>,
     sequence: u64,
+    active: BTreeMap<uuid::Uuid, TaskKind>,
     model_test_running: bool,
     pub(super) status: sync::Status,
     pub(super) sync_running: bool,
@@ -58,6 +70,7 @@ impl Default for Background {
             receiver,
             requests: BTreeMap::new(),
             sequence: 0,
+            active: BTreeMap::new(),
             model_test_running: false,
             status: sync::Status::NotConnected,
             sync_running: false,
@@ -69,12 +82,18 @@ impl Default for Background {
     }
 }
 impl Background {
-    fn spawn(&self, work: impl FnOnce() -> Completion + Send + 'static) {
+    fn spawn(&mut self, kind: TaskKind, work: impl FnOnce() -> Completion + Send + 'static) {
+        if matches!(kind, TaskKind::Sync | TaskKind::Proxy) {
+            self.active
+                .retain(|_, active| !matches!(active, TaskKind::Inspect));
+        }
+        let id = uuid::Uuid::new_v4();
+        self.active.insert(id, kind.clone());
         let sender = self.sender.clone();
         thread::spawn(move || {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(work))
-                .unwrap_or(Completion::Panicked);
-            let _ = sender.send(result);
+                .unwrap_or(Completion::Panicked(kind));
+            let _ = sender.send(Completion::Finished(id, Box::new(result)));
         });
     }
 }
@@ -102,11 +121,12 @@ impl App {
         self.status = format!("Testing {name}…");
         self.status_error = false;
         self.background.model_test_running = true;
-        self.background.spawn(move || Completion::ModelTest {
-            instance: None,
-            name,
-            result: discovery::test_model(&profile, &model.id),
-        });
+        self.background
+            .spawn(TaskKind::Test, move || Completion::ModelTest {
+                instance: None,
+                name,
+                result: discovery::test_model(&profile, &model.id),
+            });
     }
 
     pub(super) fn start_profile_connection_test(&mut self) {
@@ -137,7 +157,7 @@ impl App {
         self.status_error = false;
         self.status = "Testing Base URL connectivity…".into();
         self.background.model_test_running = true;
-        self.background.spawn(move || {
+        self.background.spawn(TaskKind::Test, move || {
             Completion::ConnectionTest(instance, discovery::test_connection(&profile))
         });
     }
@@ -171,7 +191,7 @@ impl App {
         self.status = format!("Testing {name}…");
         self.status_error = false;
         self.background.model_test_running = true;
-        self.background.spawn(move || {
+        self.background.spawn(TaskKind::Test, move || {
             let started = Instant::now();
             let result = models
                 .iter()
@@ -223,19 +243,31 @@ impl App {
         form.fetching_profile = Some(Box::new(profile.clone()));
         form.instance = uuid::Uuid::new_v4();
         let instance = form.instance;
-        self.background.spawn(move || Completion::ProfileDiscover {
-            instance,
-            result: discovery::discover(&profile),
-            profile: Box::new(profile),
-        });
+        self.background
+            .spawn(TaskKind::ProfileDiscover(instance), move || {
+                Completion::ProfileDiscover {
+                    instance,
+                    result: discovery::discover(&profile),
+                    profile: Box::new(profile),
+                }
+            });
     }
 
     pub(super) fn initialize_background(&mut self) {
-        if self.client_tab() != ClientTab::Claude {
+        if self.client_tab() != ClientTab::Claude
+            || self.background.sync_running
+            || self.background.proxy_running
+            || self.background.queued_sync.is_some()
+            || self
+                .background
+                .active
+                .values()
+                .any(|kind| matches!(kind, TaskKind::Inspect))
+        {
             return;
         }
         let paths = self.paths.clone();
-        self.background.spawn(move || {
+        self.background.spawn(TaskKind::Inspect, move || {
             let status =
                 claude_config::settings_path().and_then(|path| sync::inspect(&paths, &path));
             Completion::Inspect(status, proxy::status(&paths).ok())
@@ -261,23 +293,29 @@ impl App {
         self.background.requests.insert(id.clone(), request);
         self.status_error = false;
         self.status = format!("Fetching models from {}…", profile.name);
-        self.background.spawn(move || {
-            let result = discovery::discover(&profile);
-            Completion::Discover {
-                request,
-                id,
-                profile: Box::new(profile),
-                form,
-                result,
-            }
-        });
+        self.background
+            .spawn(TaskKind::Discover(id.clone(), request), move || {
+                let result = discovery::discover(&profile);
+                Completion::Discover {
+                    request,
+                    id,
+                    profile: Box::new(profile),
+                    form,
+                    result,
+                }
+            });
     }
 
     pub(super) fn queue_sync(&mut self, explicit: bool, preferred: Option<String>) {
-        if self.client_tab() != ClientTab::Claude {
+        if self.client_tab() != ClientTab::Claude && self.settings_menu.is_none() {
             return;
         }
-        if !explicit && !self.background.connected {
+        if !explicit
+            && !self.background.connected
+            && !claude_config::settings_path()
+                .and_then(|settings| sync::inspect(&self.paths, &settings))
+                .is_ok_and(|status| matches!(status, sync::Status::Synced | sync::Status::Pending))
+        {
             return;
         }
         if let Some(queued) = &mut self.background.queued_sync {
@@ -293,6 +331,9 @@ impl App {
         }
         self.background.due =
             Instant::now() + Duration::from_millis(if explicit { 0 } else { 200 });
+        self.background
+            .active
+            .retain(|_, kind| !matches!(kind, TaskKind::Inspect));
         self.background.status = sync::Status::Pending;
     }
 
@@ -309,7 +350,7 @@ impl App {
         let mut manager = manager.clone();
         let paths = self.paths.clone();
         self.background.proxy_running = true;
-        self.background.spawn(move || {
+        self.background.spawn(TaskKind::Proxy, move || {
             manager.activate(&paths, control);
             Completion::Proxy(Box::new(manager))
         });
@@ -318,6 +359,15 @@ impl App {
     pub(super) fn poll_background(&mut self) -> bool {
         let mut changed = false;
         while let Ok(completion) = self.background.receiver.try_recv() {
+            let completion = match completion {
+                Completion::Finished(id, result) => {
+                    if self.background.active.remove(&id).is_none() {
+                        continue;
+                    }
+                    *result
+                }
+                result => result,
+            };
             changed = true;
             match completion {
                 Completion::ConnectionTest(instance, result) => {
@@ -393,6 +443,14 @@ impl App {
                     }
                 }
                 Completion::Inspect(status, proxy) => {
+                    // A slow inspection describes the state before an action;
+                    // it must not overwrite that action's newer pending state.
+                    if self.background.sync_running
+                        || self.background.proxy_running
+                        || self.background.queued_sync.is_some()
+                    {
+                        continue;
+                    }
                     self.proxy_status = proxy;
                     match status {
                         Ok(status) => {
@@ -552,13 +610,33 @@ impl App {
                         current.selected = selected;
                     }
                 }
-                Completion::Panicked => {
-                    self.background.sync_running = false;
-                    self.background.proxy_running = false;
-                    self.background.requests.clear();
-                    self.background.status = sync::Status::Failed;
-                    self.set_error("Background task failed; changes on disk are preserved. Press p to retry sync.");
+                Completion::Panicked(kind) => {
+                    match kind {
+                        TaskKind::Test => self.background.model_test_running = false,
+                        TaskKind::Sync => {
+                            self.background.sync_running = false;
+                            self.background.status = sync::Status::Failed;
+                        }
+                        TaskKind::Proxy => self.background.proxy_running = false,
+                        TaskKind::Discover(id, request) => {
+                            if self.background.requests.get(&id) == Some(&request) {
+                                self.background.requests.remove(&id);
+                            }
+                        }
+                        TaskKind::ProfileDiscover(instance) => {
+                            if let Some(Modal::Profile(form)) = &mut self.modal
+                                && form.instance == instance
+                            {
+                                form.fetching_profile = None;
+                                form.test_message =
+                                    Some(("Model discovery failed; retry fetching".into(), true));
+                            }
+                        }
+                        TaskKind::Inspect => {}
+                    }
+                    self.set_error("Background task failed; saved changes are preserved. Retry the failed operation.");
                 }
+                Completion::Finished(_, _) => unreachable!("completion already unwrapped"),
             }
         }
         if !self.background.sync_running
@@ -570,7 +648,7 @@ impl App {
             self.background.sync_running = true;
             self.background.status = sync::Status::Syncing;
             let paths = self.paths.clone();
-            self.background.spawn(move || {
+            self.background.spawn(TaskKind::Sync, move || {
                 let result = claude_config::settings_path().and_then(|settings| {
                     sync::apply(
                         &paths,
@@ -851,5 +929,81 @@ mod tests {
         assert!(request.explicit);
         assert_eq!(request.preferred.as_deref(), Some("two"));
         assert_eq!(config::load(&app.paths.config).unwrap(), app.config);
+    }
+}
+
+#[cfg(test)]
+mod failure_tests {
+    use super::*;
+    #[test]
+    fn inspection_is_coalesced_and_older_results_cannot_replace_completed_sync() {
+        let (_temp, mut app) = crate::tui::tests::persisted_app();
+        let id = uuid::Uuid::new_v4();
+        app.background.active.insert(id, TaskKind::Inspect);
+        app.initialize_background();
+        assert_eq!(app.background.active.len(), 1);
+        app.queue_sync(true, None);
+        assert!(!app.background.active.contains_key(&id));
+        // Simulate the newer sync finishing before the old inspection returns.
+        app.background.queued_sync = None;
+        app.background.status = sync::Status::Synced;
+        app.background
+            .sender
+            .send(Completion::Finished(
+                id,
+                Box::new(Completion::Inspect(
+                    Err(anyhow::anyhow!("stale inspection")),
+                    None,
+                )),
+            ))
+            .unwrap();
+        assert!(!app.poll_background());
+        assert_eq!(app.background.status, sync::Status::Synced);
+    }
+    #[test]
+    fn inspection_errors_do_not_overwrite_an_active_proxy_operation() {
+        let (_temp, mut app) = crate::tui::tests::persisted_app();
+        app.background.proxy_running = true;
+        app.background.status = sync::Status::Synced;
+        app.background
+            .sender
+            .send(Completion::Inspect(
+                Err(anyhow::anyhow!("older status error")),
+                None,
+            ))
+            .unwrap();
+        app.poll_background();
+        assert!(app.background.proxy_running);
+        assert_eq!(app.background.status, sync::Status::Synced);
+    }
+    #[test]
+    fn panic_only_clears_its_own_task_and_model_tests_can_retry() {
+        let (_temp, mut app) = crate::tui::tests::persisted_app();
+        app.background.model_test_running = true;
+        app.background.sync_running = true;
+        app.background.proxy_running = true;
+        app.background.requests.insert("other".into(), 7);
+        app.background
+            .spawn(TaskKind::Test, || panic!("fixture failure"));
+        let event = app
+            .background
+            .receiver
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap();
+        app.background.sender.send(event).unwrap();
+        app.poll_background();
+        assert!(!app.background.model_test_running);
+        assert!(app.background.sync_running && app.background.proxy_running);
+        assert_eq!(app.background.requests.get("other"), Some(&7));
+        assert!(app.background.active.is_empty());
+        app.background
+            .sender
+            .send(Completion::Finished(
+                uuid::Uuid::new_v4(),
+                Box::new(Completion::Panicked(TaskKind::Sync)),
+            ))
+            .unwrap();
+        app.poll_background();
+        assert!(app.background.sync_running);
     }
 }

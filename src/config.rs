@@ -20,6 +20,10 @@ pub struct Config {
     #[serde(default = "default_usage_refresh_secs")]
     pub usage_refresh_secs: u64,
     #[serde(default)]
+    pub ui: UiPreferences,
+    #[serde(default)]
+    pub proxy: ProxyResources,
+    #[serde(default)]
     pub claude: crate::claude_preferences::Settings,
     #[serde(default)]
     pub codex: crate::codex::Settings,
@@ -36,6 +40,8 @@ impl Default for Config {
         Self {
             version: CONFIG_VERSION,
             usage_refresh_secs: default_usage_refresh_secs(),
+            ui: UiPreferences::default(),
+            proxy: ProxyResources::default(),
             claude: Default::default(),
             codex: Default::default(),
             pi: Default::default(),
@@ -45,8 +51,93 @@ impl Default for Config {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PulseStartPage {
+    #[default]
+    Home,
+    Sessions,
+    Charts,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UiPreferences {
+    pub pulse_visual: bool,
+    pub pulse_models: bool,
+    pub pulse_start_page: PulseStartPage,
+    pub pulse_sort_tokens: bool,
+    pub claude_new_model_1m: bool,
+    pub claude_new_model_enabled: bool,
+    pub codex_new_model_enabled: bool,
+    pub grok_new_model_enabled: bool,
+}
+
+impl Default for UiPreferences {
+    fn default() -> Self {
+        Self {
+            pulse_visual: false,
+            pulse_models: false,
+            pulse_start_page: PulseStartPage::Home,
+            pulse_sort_tokens: false,
+            claude_new_model_1m: true,
+            claude_new_model_enabled: true,
+            codex_new_model_enabled: true,
+            grok_new_model_enabled: true,
+        }
+    }
+}
+
+/// Resource limits for the local proxy, applied when its daemon starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProxyResources {
+    pub max_inflight: usize,
+    pub max_token_tasks: usize,
+    pub max_body_mib: usize,
+}
+impl Default for ProxyResources {
+    fn default() -> Self {
+        Self {
+            max_inflight: 16,
+            max_token_tasks: 2,
+            max_body_mib: 32,
+        }
+    }
+}
+impl ProxyResources {
+    pub fn validate(&self) -> Result<()> {
+        if !(1..=64).contains(&self.max_inflight) {
+            bail!("Proxy concurrent requests must be between 1 and 64");
+        }
+        if !(1..=8).contains(&self.max_token_tasks) || self.max_token_tasks > self.max_inflight {
+            bail!("Token tasks must be between 1 and 8 and cannot exceed concurrent requests");
+        }
+        if !(1..=128).contains(&self.max_body_mib) {
+            bail!("Proxy body limit must be between 1 and 128 MiB");
+        }
+        Ok(())
+    }
+    pub fn body_bytes(&self) -> usize {
+        self.max_body_mib * 1024 * 1024
+    }
+}
+
 fn default_usage_refresh_secs() -> u64 {
     2
+}
+
+#[cfg(test)]
+mod ui_preferences_tests {
+    use super::*;
+
+    #[test]
+    fn old_configs_keep_existing_ui_defaults() {
+        let config: Config = toml::from_str("version = 6\n").unwrap();
+        assert_eq!(config.ui, UiPreferences::default());
+        assert!(config.ui.claude_new_model_1m);
+        assert_eq!(config.ui.pulse_start_page, PulseStartPage::Home);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -465,6 +556,7 @@ pub fn load(path: &Path) -> Result<Config> {
     config.grok.restore_suspended(&mut profiles);
     config.grok.profiles = profiles;
     validate_usage_refresh_secs(config.usage_refresh_secs)?;
+    config.proxy.validate()?;
     config.claude.validate()?;
     config.grok.preferences.validate()?;
     Ok(config)
@@ -568,6 +660,7 @@ fn update_locked(
     edit(&mut latest)?;
     suspend_codex_api_providers(&mut latest);
     validate_usage_refresh_secs(latest.usage_refresh_secs)?;
+    latest.proxy.validate()?;
     latest.version = CONFIG_VERSION;
     for (id, profile) in latest
         .profiles
@@ -995,5 +1088,46 @@ mod grok_tests {
             load_client(&path, Client::Grok).unwrap().profiles,
             after.grok.profiles
         );
+    }
+}
+
+#[cfg(test)]
+mod resource_tests {
+    use super::*;
+    #[test]
+    fn old_configuration_defaults_and_limits_are_validated_on_load_and_save() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.toml");
+        fs::write(&path, "version=6\n").unwrap();
+        assert_eq!(load(&path).unwrap().proxy, ProxyResources::default());
+        for edited in [
+            ProxyResources {
+                max_inflight: 0,
+                ..Default::default()
+            },
+            ProxyResources {
+                max_token_tasks: 9,
+                ..Default::default()
+            },
+            ProxyResources {
+                max_inflight: 1,
+                ..Default::default()
+            },
+            ProxyResources {
+                max_body_mib: 129,
+                ..Default::default()
+            },
+        ] {
+            assert!(
+                try_update(&path, |c| {
+                    c.proxy = edited;
+                    Ok(())
+                })
+                .is_err()
+            );
+            assert_eq!(load(&path).unwrap().proxy, ProxyResources::default());
+        }
+        fs::write(&path, "version=6\n[proxy]\nmax_inflight=0\n").unwrap();
+        assert!(load(&path).is_err());
     }
 }

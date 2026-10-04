@@ -52,6 +52,19 @@ jobs:
       - run: cargo test --locked --all-targets --all-features
         timeout-minutes: 5
 
+  msrv:
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --locked --all-targets --all-features
+
   windows-test:
     runs-on: windows-2022
     timeout-minutes: 25
@@ -108,7 +121,7 @@ jobs:
           if-no-files-found: error
 
   build:
-    needs: test
+    needs: [test, msrv]
     strategy:
       fail-fast: false
       matrix:

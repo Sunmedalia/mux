@@ -33,37 +33,55 @@ pub(super) async fn begin(
     .await
 }
 
+/// Buffer only once for non-streaming ingress and parse once for both metering
+/// and conversion. Cancellation drops the ticket with an interrupted outcome.
+pub(super) async fn read_observed_body(
+    response: reqwest::Response,
+    mut ticket: Option<Ticket>,
+    limit: usize,
+) -> Result<(Vec<u8>, Option<Value>)> {
+    let success = response.status().is_success();
+    if success && let Some(ticket) = &mut ticket {
+        ticket.outcome = "interrupted";
+    }
+    let bytes = read_body(response, limit, !success).await?;
+    let value = serde_json::from_slice::<Value>(&bytes).ok();
+    if success && let Some(ticket) = &mut ticket {
+        ticket.outcome = "failed";
+        if let Some(value) = &value {
+            ticket.observe_usage(value);
+            ticket.outcome = if value.get("error").is_some_and(|v| !v.is_null())
+                || value["status"] == "failed"
+            {
+                "failed"
+            } else if value["status"] == "incomplete" {
+                "interrupted"
+            } else {
+                "success"
+            };
+        }
+    }
+    Ok((bytes, value))
+}
+
 struct Observer {
     ticket: Ticket,
-    streaming: bool,
     decoder: Decoder,
-    body: Vec<u8>,
     invalid: bool,
     completed: bool,
 }
 impl Observer {
-    fn new(mut ticket: Ticket, streaming: bool) -> Self {
+    fn new(mut ticket: Ticket) -> Self {
         ticket.outcome = "interrupted";
         Self {
             ticket,
-            streaming,
             decoder: Decoder::default(),
-            body: vec![],
             invalid: false,
             completed: false,
         }
     }
     fn push(&mut self, bytes: &[u8]) {
         if self.invalid || self.completed {
-            return;
-        }
-        if !self.streaming {
-            if self.body.len().saturating_add(bytes.len()) > BODY_LIMIT {
-                self.invalid = true;
-                self.body.clear();
-            } else {
-                self.body.extend_from_slice(bytes);
-            }
             return;
         }
         let frames = match self.decoder.push(bytes) {
@@ -110,23 +128,6 @@ impl Observer {
             }
         }
     }
-    fn finish(&mut self) {
-        if self.streaming || self.invalid {
-            return;
-        }
-        match serde_json::from_slice::<Value>(&self.body) {
-            Ok(v) => {
-                self.ticket.observe_usage(&v);
-                self.ticket.outcome =
-                    if v.get("error").is_some_and(|e| !e.is_null()) || v["status"] == "failed" {
-                        "failed"
-                    } else {
-                        "success"
-                    };
-            }
-            Err(_) => self.ticket.outcome = "failed",
-        }
-    }
 }
 
 pub(super) fn observe(
@@ -134,6 +135,7 @@ pub(super) fn observe(
     ticket: Option<Ticket>,
     streaming: bool,
 ) -> reqwest::Response {
+    debug_assert!(streaming, "Non-streaming ingress uses read_observed_body");
     let Some(ticket) = ticket else {
         return response;
     };
@@ -148,7 +150,7 @@ pub(super) fn observe(
     *builder.headers_mut().expect("response headers") = response.headers().clone();
     let mut upstream = response.bytes_stream();
     // Own the guard outside the generator so an unpolled response is still finalized.
-    let mut observer = Observer::new(ticket, streaming);
+    let mut observer = Observer::new(ticket);
     let stream = async_stream::stream! {
         while let Some(chunk) = upstream.next().await {
             match chunk {
@@ -156,7 +158,6 @@ pub(super) fn observe(
                 Err(error) => { yield Err(error); return; }
             }
         }
-        observer.finish();
     };
     builder
         .body(reqwest::Body::wrap_stream(stream))
@@ -182,7 +183,7 @@ mod tests {
         // Headers/hidden reasoning may take most of the time; the final text can
         // arrive in one burst. That wait must remain in the denominator.
         tokio::time::sleep(std::time::Duration::from_millis(40)).await;
-        let mut observer = Observer::new(ticket, true);
+        let mut observer = Observer::new(ticket);
         observer
             .push(b"data: {\"type\":\"content_block_delta\",\"delta\":{\"text\":\"hello\"}}\n\n");
         observer.push(b"data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":20}}\n\ndata: {\"type\":\"message_stop\"}\n\n");
@@ -205,7 +206,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let mut observer = Observer::new(ticket, true);
+        let mut observer = Observer::new(ticket);
         observer.push(b"data: {\"type\":\"response.incomplete\",\"response\":{\"usage\":{\"output_tokens\":20}}}\n\n");
         drop(observer);
         let total = settled(&path, 1)
@@ -302,11 +303,20 @@ mod tests {
                 .body(reqwest::Body::from(body))
                 .unwrap()
                 .into();
-            let observed = observe(original, ticket, streaming);
-            if consume {
-                let _ = observed.bytes().await.unwrap();
+            if !streaming && consume {
+                read_observed_body(original, ticket, BODY_LIMIT)
+                    .await
+                    .unwrap();
+            } else if streaming {
+                let observed = observe(original, ticket, true);
+                if consume {
+                    observed.bytes().await.unwrap();
+                } else {
+                    drop(observed);
+                }
             } else {
-                drop(observed);
+                drop(original);
+                drop(ticket);
             }
         }
         // A connection failure before headers drops the original ticket.

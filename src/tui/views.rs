@@ -4,12 +4,23 @@ impl App {
     pub(super) fn draw(&mut self, frame: &mut ratatui::Frame) {
         self.draw_content(frame);
         let theme = match &self.modal {
+            Some(Modal::SettingsMenu(menu)) => menu.theme,
             Some(Modal::Appearance(form)) => form.theme,
-            Some(Modal::Preferences(form)) => form.return_theme.unwrap_or(self.theme),
-            Some(Modal::Proxy(manager)) => manager
-                .return_appearance
-                .as_ref()
-                .map_or(self.theme, |form| form.theme),
+            Some(Modal::Preferences(form)) => form
+                .return_theme
+                .or_else(|| self.settings_menu.as_ref().map(|menu| menu.theme))
+                .unwrap_or(self.theme),
+            Some(Modal::Grok(_)) if self.settings_menu.is_some() => {
+                self.settings_menu.as_ref().unwrap().theme
+            }
+            Some(Modal::Proxy(manager)) => manager.return_appearance.as_ref().map_or_else(
+                || {
+                    self.settings_menu
+                        .as_ref()
+                        .map_or(self.theme, |menu| menu.theme)
+                },
+                |form| form.theme,
+            ),
             _ => self.theme,
         };
         theme.apply(frame.buffer_mut());
@@ -43,12 +54,34 @@ impl App {
             );
             return;
         }
-        if matches!(self.modal, Some(Modal::Appearance(_) | Modal::Proxy(_))) {
+        if matches!(
+            self.modal,
+            Some(
+                Modal::Appearance(_)
+                    | Modal::SettingsMenu(_)
+                    | Modal::UiOptions(_)
+                    | Modal::CodexSettings(_)
+            )
+        ) || (matches!(self.modal, Some(Modal::Proxy(_))) && self.settings_menu.is_none())
+        {
             self.draw_client_tabs(frame, area);
             if let Some(modal) = &self.modal {
                 self.draw_modal(frame, modal);
-                self.draw_page_header_actions(frame, modal_area_for(modal, area));
+                if !matches!(modal, Modal::SettingsMenu(_)) {
+                    self.draw_page_header_actions(frame, modal_area_for(modal, area));
+                }
             }
+            return;
+        }
+        if let Some(menu) = &self.settings_menu
+            && matches!(
+                self.modal,
+                Some(Modal::Preferences(_) | Modal::Grok(_) | Modal::Proxy(_))
+            )
+        {
+            self.draw_client_tabs(frame, area);
+            settings::draw_client_sidebar(frame, settings_page_area(area), menu);
+            self.draw_modal(frame, self.modal.as_ref().unwrap());
             return;
         }
         if matches!(self.modal, Some(Modal::Help(_)))
@@ -1226,9 +1259,20 @@ impl App {
     }
 
     pub(super) fn draw_modal(&self, frame: &mut ratatui::Frame, modal: &Modal) {
-        let area = modal_area_for(modal, frame.area());
+        let area = if self.settings_menu.is_some()
+            && matches!(
+                modal,
+                Modal::Preferences(_) | Modal::Grok(_) | Modal::Proxy(_)
+            ) {
+            settings::client_editor_area(frame.area())
+        } else {
+            modal_area_for(modal, frame.area())
+        };
         frame.render_widget(Clear, area);
         match modal {
+            Modal::SettingsMenu(menu) => settings::draw_menu(frame, area, menu),
+            Modal::UiOptions(options) => settings::draw_options(frame, area, options),
+            Modal::CodexSettings(form) => settings::draw_codex_settings(frame, area, form),
             Modal::Grok(dialog) => grok::draw_dialog(frame, area, dialog),
             Modal::Appearance(form) => theme::draw(
                 frame,
@@ -1433,6 +1477,7 @@ impl App {
                 } else {
                     "Claude"
                 },
+                self.settings_menu.is_some(),
             ),
             Modal::DeleteProfile => {
                 draw_confirmation(

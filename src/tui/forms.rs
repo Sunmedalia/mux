@@ -33,11 +33,12 @@ pub(super) const PROVIDER_TEMPLATES: [ProviderTemplate; 3] = [
 ];
 
 impl ProxyManager {
-    pub(super) const CONTROLS: [ProxyControl; 7] = [
+    pub(super) const CONTROLS: [ProxyControl; 8] = [
         ProxyControl::Start,
         ProxyControl::Stop,
         ProxyControl::Refresh,
         ProxyControl::Port,
+        ProxyControl::Resources,
         ProxyControl::EnableAtLogin,
         ProxyControl::DisableAtLogin,
         ProxyControl::Close,
@@ -48,6 +49,9 @@ impl ProxyManager {
             return_appearance: None,
             instance: uuid::Uuid::new_v4(),
             port_field: None,
+            resource_fields: None,
+            resource_original: None,
+            resource_selected: 0,
             port_changed: false,
             runtime: None,
             service: None,
@@ -85,6 +89,70 @@ impl ProxyManager {
         self.error = false;
     }
 
+    pub(super) fn edit_resources(&mut self, paths: &AppPaths) -> Result<()> {
+        let resources = config::load(&paths.config)?.proxy;
+        self.resource_original = Some(resources);
+        self.resource_selected = 0;
+        self.resource_fields = Some(vec![
+            field("Requests", &resources.max_inflight.to_string()),
+            field("Token tasks", &resources.max_token_tasks.to_string()),
+            field("Body MiB", &resources.max_body_mib.to_string()),
+        ]);
+        self.error = false;
+        self.message = "Requests 1–64 · Token tasks 1–8 (≤ requests) · Body 1–128 MiB. Stop and Start proxy after saving.".into();
+        Ok(())
+    }
+
+    pub(super) fn save_resources(&mut self, paths: &AppPaths) -> Result<()> {
+        let fields = self
+            .resource_fields
+            .as_ref()
+            .context("Open resources first")?;
+        let parse = |index: usize| -> Result<usize> {
+            fields[index]
+                .value
+                .trim()
+                .parse()
+                .with_context(|| format!("{} must be a positive integer", fields[index].label))
+        };
+        let edited = config::ProxyResources {
+            max_inflight: parse(0)?,
+            max_token_tasks: parse(1)?,
+            max_body_mib: parse(2)?,
+        };
+        edited.validate()?;
+        let old = self
+            .resource_original
+            .context("Missing resources baseline")?;
+        config::try_update(&paths.config, |config| {
+            macro_rules! merge {
+                ($field:ident) => {
+                    if edited.$field != old.$field {
+                        if config.proxy.$field != old.$field && config.proxy.$field != edited.$field
+                        {
+                            anyhow::bail!(
+                                "{} changed elsewhere; reopen resources",
+                                stringify!($field)
+                            );
+                        }
+                        config.proxy.$field = edited.$field;
+                    }
+                };
+            }
+            merge!(max_inflight);
+            merge!(max_token_tasks);
+            merge!(max_body_mib);
+            Ok(())
+        })?;
+        self.resource_fields = None;
+        self.resource_original = None;
+        self.error = false;
+        self.message =
+            "Resources saved · Stop and Start proxy to apply; running requests keep their limits"
+                .into();
+        Ok(())
+    }
+
     fn save_port(&mut self, paths: &AppPaths) -> Result<String> {
         let value = self
             .port_field
@@ -111,6 +179,7 @@ impl ProxyManager {
         self.port_changed = false;
         let result = match control {
             ProxyControl::Port => self.save_port(paths),
+            ProxyControl::Resources => self.save_resources(paths).map(|()| self.message.clone()),
             ProxyControl::Start => proxy::start(paths, None)
                 .map(|status| format!("Proxy started at {}", status.listen)),
             ProxyControl::Stop => proxy::stop(paths).map(|()| "Proxy stopped".into()),
@@ -1418,7 +1487,32 @@ pub(super) fn draw_proxy_manager(
     area: Rect,
     manager: &ProxyManager,
     client: &str,
+    embedded: bool,
 ) {
+    if let Some(fields) = &manager.resource_fields {
+        draw_form(
+            frame,
+            area,
+            " Proxy resources ",
+            fields,
+            manager.resource_selected,
+            false,
+        );
+        let inner = panel_inner(area);
+        frame.render_widget(
+            Paragraph::new(manager.message.as_str())
+                .wrap(Wrap { trim: true })
+                .style(Style::default().fg(if manager.error { ERROR } else { MUTED })),
+            Rect::new(
+                inner.x,
+                inner.y + 3,
+                inner.width,
+                inner.height.saturating_sub(5),
+            ),
+        );
+        draw_modal_buttons(frame, area, &["Save", "Cancel"]);
+        return;
+    }
     if let Some(port) = &manager.port_field {
         draw_form(
             frame,
@@ -1445,37 +1539,48 @@ pub(super) fn draw_proxy_manager(
         return;
     }
     frame.render_widget(
-        panel(if area.width < 90 { "" } else { " Settings " }, true),
+        panel(
+            if embedded {
+                " Proxy service "
+            } else if area.width < 90 {
+                ""
+            } else {
+                " Settings "
+            },
+            true,
+        ),
         area,
     );
-    frame.render_widget(
-        Paragraph::new(if area.width < 90 {
-            if manager
-                .return_appearance
-                .as_ref()
-                .is_some_and(|form| form.dirty())
-            {
-                "UI *"
+    if !embedded {
+        frame.render_widget(
+            Paragraph::new(if area.width < 90 {
+                if manager
+                    .return_appearance
+                    .as_ref()
+                    .is_some_and(|form| form.dirty())
+                {
+                    "UI *"
+                } else {
+                    "UI"
+                }
             } else {
-                "UI"
-            }
-        } else {
-            "Display [F4]"
-        })
-        .alignment(Alignment::Center)
-        .style(button_style(false, false, false)),
-        settings_appearance_button(area),
-    );
-    frame.render_widget(
-        Paragraph::new(if area.width < 90 {
-            "Proxy"
-        } else {
-            "Proxy [P]"
-        })
-        .alignment(Alignment::Center)
-        .style(button_style(true, false, false)),
-        settings_proxy_button(area),
-    );
+                "Display [F4]"
+            })
+            .alignment(Alignment::Center)
+            .style(button_style(false, false, false)),
+            settings_appearance_button(area),
+        );
+        frame.render_widget(
+            Paragraph::new(if area.width < 90 {
+                "Proxy"
+            } else {
+                "Proxy [P]"
+            })
+            .alignment(Alignment::Center)
+            .style(button_style(true, false, false)),
+            settings_proxy_button(area),
+        );
+    }
     let inner = panel_inner(area);
     let running = manager
         .runtime
@@ -1485,19 +1590,43 @@ pub(super) fn draw_proxy_manager(
         .service
         .as_ref()
         .is_some_and(|status| status.installed);
+    let login_state = if !installed {
+        "○ Disabled"
+    } else if manager
+        .service
+        .as_ref()
+        .is_some_and(|service| service.loaded == Some(false))
+    {
+        "◐ Configured · unloaded"
+    } else {
+        "● Enabled"
+    };
     let runtime_color = if running { CONNECTED } else { WARNING };
-    let rail = Line::from(vec![
-        Span::styled(client, Style::default().add_modifier(Modifier::BOLD)),
-        Span::styled("  ──▶  ", Style::default().fg(MUTED)),
-        Span::styled(
-            format!("Mux proxy {}", if running { '●' } else { '○' }),
-            Style::default()
-                .fg(runtime_color)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("  ──▶  ", Style::default().fg(MUTED)),
-        Span::styled("Provider APIs", Style::default().fg(ROUTE)),
-    ]);
+    let rail = if area.width < 55 {
+        Line::from(vec![
+            Span::styled(client, Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled("  →  ", Style::default().fg(MUTED)),
+            Span::styled(
+                format!("Mux proxy {}", if running { '●' } else { '○' }),
+                Style::default()
+                    .fg(runtime_color)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled(client, Style::default().add_modifier(Modifier::BOLD)),
+            Span::styled("  ──▶  ", Style::default().fg(MUTED)),
+            Span::styled(
+                format!("Mux proxy {}", if running { '●' } else { '○' }),
+                Style::default()
+                    .fg(runtime_color)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("  ──▶  ", Style::default().fg(MUTED)),
+            Span::styled("Provider APIs", Style::default().fg(ROUTE)),
+        ])
+    };
     frame.render_widget(
         Paragraph::new(rail).alignment(Alignment::Center),
         Rect::new(inner.x, inner.y, inner.width, 1),
@@ -1505,62 +1634,75 @@ pub(super) fn draw_proxy_manager(
 
     let runtime = manager.runtime.as_ref();
     let service = manager.service.as_ref();
-    let details = vec![
-        Line::raw(""),
-        detail(
-            "Runtime",
-            if running {
-                "● Running in background"
-            } else {
-                "○ Stopped"
-            },
-        ),
-        detail(
-            "Listen",
-            runtime
-                .map(|status| status.listen.as_str())
-                .unwrap_or("unknown"),
-        ),
-        detail(
-            "PID / routes",
-            &runtime
-                .map(|status| {
-                    format!(
-                        "{} / {}",
-                        status
-                            .pid
-                            .map(|pid| pid.to_string())
-                            .unwrap_or_else(|| "—".into()),
-                        status.routes
-                    )
-                })
-                .unwrap_or_else(|| "unknown".into()),
-        ),
-        Line::raw(""),
-        detail(
-            "Start at login",
-            if installed {
-                "● Enabled"
-            } else {
-                "○ Disabled"
-            },
-        ),
-        detail(
-            "Service",
-            service.map(|status| status.manager).unwrap_or("unknown"),
-        ),
-        detail(
-            "Definition",
-            &service
-                .map(|status| status.path.display().to_string())
-                .unwrap_or_else(|| "unknown".into()),
-        ),
-        Line::raw(""),
-        Line::styled(
-            "Sync all starts the proxy automatically. You can close the TUI afterward.",
-            Style::default().fg(MUTED),
-        ),
-    ];
+    let details = if area.height <= 12 {
+        vec![
+            detail(
+                "Runtime",
+                if running {
+                    "● Running"
+                } else {
+                    "○ Stopped"
+                },
+            ),
+            detail(
+                "Listen",
+                runtime
+                    .map(|status| status.listen.as_str())
+                    .unwrap_or("unknown"),
+            ),
+            detail("Login", login_state),
+        ]
+    } else {
+        vec![
+            Line::raw(""),
+            detail(
+                "Runtime",
+                if running {
+                    "● Running in background"
+                } else {
+                    "○ Stopped"
+                },
+            ),
+            detail(
+                "Listen",
+                runtime
+                    .map(|status| status.listen.as_str())
+                    .unwrap_or("unknown"),
+            ),
+            detail(
+                "PID / routes",
+                &runtime
+                    .map(|status| {
+                        format!(
+                            "{} / {}",
+                            status
+                                .pid
+                                .map(|pid| pid.to_string())
+                                .unwrap_or_else(|| "—".into()),
+                            status.routes
+                        )
+                    })
+                    .unwrap_or_else(|| "unknown".into()),
+            ),
+            Line::raw(""),
+            detail("Start at login", login_state),
+            detail(
+                "Service",
+                service.map(|status| status.manager).unwrap_or("unknown"),
+            ),
+            detail(
+                "Definition",
+                &service
+                    .map(|status| status.path.display().to_string())
+                    .unwrap_or_else(|| "unknown".into()),
+            ),
+            Line::raw(""),
+            Line::styled(
+                "Sync all starts the proxy automatically. You can close the TUI afterward.",
+                Style::default().fg(MUTED),
+            ),
+        ]
+    };
     frame.render_widget(
         Paragraph::new(details).wrap(Wrap { trim: false }),
         Rect::new(
@@ -1592,6 +1734,7 @@ pub(super) fn proxy_controls(area: Rect) -> Vec<(ProxyControl, Rect)> {
         (ProxyControl::Stop, "Stop"),
         (ProxyControl::Refresh, "Refresh"),
         (ProxyControl::Port, "Port (e)"),
+        (ProxyControl::Resources, "Limits (L)"),
     ];
     let second = [
         (ProxyControl::EnableAtLogin, "Enable at login"),
@@ -1653,6 +1796,7 @@ pub(super) fn proxy_control_index(control: ProxyControl) -> usize {
 
 pub(super) fn proxy_control_key(control: ProxyControl) -> KeyEvent {
     let code = match control {
+        ProxyControl::Resources => KeyCode::Char('L'),
         ProxyControl::Port => KeyCode::Char('e'),
         ProxyControl::Start => KeyCode::Char('s'),
         ProxyControl::Stop => KeyCode::Char('x'),
@@ -1675,10 +1819,29 @@ pub(super) fn draw_proxy_controls(frame: &mut ratatui::Frame, area: Rect, manage
         .is_some_and(|status| status.installed);
     for (control, rect) in proxy_controls(area) {
         let label = match control {
-            ProxyControl::Port => "Port (e)",
+            ProxyControl::Port => {
+                if rect.width < 10 {
+                    "Port"
+                } else {
+                    "Port (e)"
+                }
+            }
+            ProxyControl::Resources => {
+                if rect.width < 10 {
+                    "Limits"
+                } else {
+                    "Limits (L)"
+                }
+            }
             ProxyControl::Start => "Start",
             ProxyControl::Stop => "Stop",
-            ProxyControl::Refresh => "Refresh",
+            ProxyControl::Refresh => {
+                if rect.width < 9 {
+                    "Reload"
+                } else {
+                    "Refresh"
+                }
+            }
             ProxyControl::EnableAtLogin => {
                 if rect.width < 18 {
                     "Login on"

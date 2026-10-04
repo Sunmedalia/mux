@@ -61,7 +61,17 @@ fn settings(fields: &[FormField]) -> Result<Preferences> {
 }
 impl App {
     pub(super) fn open_grok_preferences(&mut self, appearance: Option<theme::Appearance>) {
-        let p = self.config.grok.preferences.clone();
+        let p = if self.settings_menu.is_some() {
+            match config::load(&self.paths.config) {
+                Ok(config) => config.grok.preferences,
+                Err(error) => {
+                    self.set_error(format!("Could not read Grok settings: {error}"));
+                    return;
+                }
+            }
+        } else {
+            self.config.grok.preferences.clone()
+        };
         let mut fields = vec![
             field("Default model", p.default.as_deref().unwrap_or("")),
             field("Web search model", p.web_search.as_deref().unwrap_or("")),
@@ -354,9 +364,13 @@ impl App {
                     && key.code == KeyCode::Char('m')
                     && *selected < 3
                 {
-                    let native_settings = &self.config.grok;
-                    let models: Vec<String> = self
-                        .config
+                    let grok_config = if self.settings_menu.is_some() {
+                        config::load_client(&self.paths.config, config::Client::Grok)?
+                    } else {
+                        self.config.clone()
+                    };
+                    let native_settings = &grok_config.grok;
+                    let models: Vec<String> = grok_config
                         .profiles
                         .iter()
                         .flat_map(|(id, p)| {
@@ -390,7 +404,7 @@ impl App {
                     }
                     FormOutcome::Submit => {
                         let edited = settings(fields)?;
-                        self.config = self.update_client_config(|c| {
+                        let edit = |c: &mut Config| {
                             if c.grok.preferences != *original && c.grok.preferences != edited {
                                 anyhow::bail!(
                                     "Grok settings changed in another instance; reopen settings"
@@ -407,11 +421,68 @@ impl App {
                             }
                             c.grok.preferences = edited;
                             Ok(())
-                        })?;
+                        };
+                        let saved = if self.settings_menu.is_some() {
+                            config::try_update(&self.paths.config, edit)?
+                        } else {
+                            self.update_client_config(edit)?
+                        };
+                        let mut sync_error = None;
+                        if self.settings_menu.is_some() {
+                            self.config.grok = saved.grok;
+                            if native::connected(&self.paths) {
+                                let scoped =
+                                    config::load_client(&self.paths.config, config::Client::Grok)?;
+                                let previous_default = scoped.grok.preferences.default.clone();
+                                let applied = native::apply(
+                                    &self.paths,
+                                    &self.grok_home,
+                                    &scoped,
+                                    None,
+                                    false,
+                                );
+                                match applied {
+                                    Ok(default)
+                                        if previous_default != default
+                                            && previous_default.as_deref().is_some_and(|key| {
+                                                scoped.grok.managed_key(key)
+                                            }) =>
+                                    {
+                                        match config::try_update(&self.paths.config, |latest| {
+                                            if latest.grok.preferences.default != previous_default {
+                                                anyhow::bail!(
+                                                    "Grok default changed in another instance; reopen settings"
+                                                );
+                                            }
+                                            latest.grok.preferences.default = default.clone();
+                                            Ok(())
+                                        }) {
+                                            Ok(updated) => self.config.grok = updated.grok,
+                                            Err(error) => {
+                                                sync_error = Some(format!(
+                                                    "Grok settings synced; could not record resolved default: {error}"
+                                                ))
+                                            }
+                                        }
+                                    }
+                                    Err(error) => {
+                                        sync_error = Some(format!(
+                                            "Grok settings saved; sync failed: {error}"
+                                        ))
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        } else {
+                            self.config = saved;
+                        }
                         self.status =
                             "Grok settings saved · p connects · connected saves sync automatically"
                                 .into();
                         self.status_error = false;
+                        if let Some(error) = sync_error {
+                            self.set_error(error);
+                        }
                         if let Some(a) = appearance {
                             self.modal = Some(Modal::Appearance(a.clone()));
                         }
@@ -541,11 +612,26 @@ pub(super) fn draw_dialog(frame: &mut ratatui::Frame, area: Rect, dialog: &Dialo
                 );
                 draw_modal_buttons(frame, area, &["Discard", "Keep editing"]);
             } else {
+                let mut compact_fields = fields.clone();
+                if area.width < 55 {
+                    for field in &mut compact_fields {
+                        field.label = match field.label {
+                            "Default model" => "Default",
+                            "Web search model" => "Web search",
+                            "Fork secondary model" => "Fork model",
+                            "Reasoning effort" => "Reasoning",
+                            "Permission mode" => "Permission",
+                            "Compact mode" => "Compact",
+                            "Show thinking" => "Thinking",
+                            other => other,
+                        };
+                    }
+                }
                 draw_form(
                     frame,
                     area,
                     " Grok client settings ",
-                    fields,
+                    &compact_fields,
                     *selected,
                     false,
                 );

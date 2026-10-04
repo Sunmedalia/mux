@@ -56,7 +56,7 @@ impl Theme {
             .unwrap_or_default()
     }
 
-    fn save(self, paths: &AppPaths) -> Result<()> {
+    pub(super) fn save(self, paths: &AppPaths) -> Result<()> {
         crate::codex::atomic_write(
             &paths.state_dir.join("tui-theme.json"),
             &serde_json::to_vec(&self)?,
@@ -329,7 +329,7 @@ impl PulseTheme {
         Self::Orchid,
     ];
 
-    fn name(self) -> &'static str {
+    pub(super) fn name(self) -> &'static str {
         match self {
             Self::Pulse => "Pulse / blue gray & cyan",
             Self::Slate => "Graphite / quiet workspace",
@@ -368,7 +368,7 @@ impl PulseTheme {
             .unwrap_or_default()
     }
 
-    fn save(self, paths: &AppPaths) -> Result<()> {
+    pub(super) fn save(self, paths: &AppPaths) -> Result<()> {
         crate::codex::atomic_write(
             &paths.state_dir.join("pulse-theme.json"),
             &serde_json::to_vec(&self)?,
@@ -886,7 +886,11 @@ impl App {
         form.error = None;
         match key.code {
             KeyCode::Esc => {
-                self.usage.active = form.return_usage;
+                if self.settings_menu.is_some() {
+                    self.return_settings_menu();
+                } else {
+                    self.usage.active = form.return_usage;
+                }
                 return Ok(true);
             }
             KeyCode::Enter | KeyCode::Char('s') => {
@@ -912,7 +916,22 @@ impl App {
                     form.usage_refresh_secs
                 );
                 self.status_error = false;
-                self.usage.active = form.return_usage;
+                if self.settings_menu.is_some() {
+                    self.return_settings_menu();
+                } else {
+                    self.usage.active = form.return_usage;
+                }
+                return Ok(true);
+            }
+            KeyCode::Char('o') if form.pulse_selected => {
+                self.modal = Some(Modal::UiOptions(UiOptions {
+                    kind: OptionsKind::Pulse,
+                    selected: 0,
+                    original: self.config.ui.clone(),
+                    edited: self.config.ui.clone(),
+                    error: None,
+                    return_appearance: Some(form.clone()),
+                }));
                 return Ok(true);
             }
             KeyCode::Char('c')
@@ -1167,7 +1186,11 @@ pub(super) fn draw(
             Paragraph::new(if form.refresh_selected {
                 "Tab section · ←/→ interval · 1–6 presets · Enter save"
             } else {
-                "Tab section · ↑/↓ theme · Enter save · Esc cancel"
+                if form.pulse_selected {
+                    "Tab section · ↑/↓ theme · o display defaults · Enter save"
+                } else {
+                    "Tab section · ↑/↓ theme · Enter save · Esc cancel"
+                }
             })
             .style(Style::default().fg(MUTED)),
             Rect::new(inner.x, inner.y + 1, inner.width, 1),
@@ -1268,7 +1291,11 @@ pub(super) fn draw(
     } else {
         frame.render_widget(
             Paragraph::new(if form.pulse_selected {
-                "Preview · Pulse pane only"
+                if area.width < 64 {
+                    "Display defaults [o]"
+                } else {
+                    "Preview · Pulse pane only · o: display defaults"
+                }
             } else {
                 "Preview · editor only"
             })

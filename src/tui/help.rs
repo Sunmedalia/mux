@@ -335,9 +335,17 @@ pub(super) fn help_commands(section: HelpSection) -> &'static [(&'static str, &'
             ("? / F2", "Help / switch agent when navigation is available"),
         ],
         HelpSection::Settings => &[
+            ("↑↓ / Enter", "Select category / edit its fields"),
+            ("Tab / [ ]", "Switch focus / category; keep drafts"),
+            ("Ctrl+S / Ctrl+R", "Save changes / discard unsaved changes"),
             (
-                "Refresh 1–6",
-                "Choose 1 / 2 / 5 / 10 / 30 / 60 second presets",
+                "Pulse",
+                "Configure monitor view, details, start page and sorting",
+            ),
+            ("New models", "Set Claude 1M and per-client enable defaults"),
+            (
+                "Usage ← / →",
+                "Adjust polling interval from 1 to 60 seconds",
             ),
             (
                 "Refresh − / +",
@@ -396,6 +404,10 @@ pub(super) fn help_commands(section: HelpSection) -> &'static [(&'static str, &'
             ("s / x / r", "Start / stop / refresh proxy"),
             ("i / u", "Enable / disable startup at login"),
             ("e", "Edit port when proxy is idle"),
+            (
+                "L",
+                "Edit request, Token task and body limits; restart proxy to apply",
+            ),
             (
                 "Port Enter / Esc",
                 "Apply / cancel port edit; form cursor keys also work",
@@ -613,7 +625,7 @@ impl App {
         self.modal = None;
         self.help_return = None;
         if action == HelpAction::Settings {
-            self.open_appearance();
+            self.open_settings_menu();
             return Ok(());
         }
         self.usage.active = false;

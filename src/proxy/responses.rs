@@ -2,7 +2,7 @@
 use super::*;
 use std::collections::BTreeSet;
 
-fn error(status: StatusCode, message: impl std::fmt::Display) -> Response {
+pub(super) fn error(status: StatusCode, message: impl std::fmt::Display) -> Response {
     (
         status,
         Json(json!({"error":{"type":"api_error","message":message.to_string()}})),
@@ -164,7 +164,7 @@ async fn serve(
         Credential::ApiKey { value } => request.header("api-key", value),
         Credential::None => request,
     };
-    let ticket = metering::begin(
+    let mut ticket = metering::begin(
         &state,
         &target,
         &profile_id,
@@ -182,7 +182,20 @@ async fn serve(
             );
         }
     };
-    let response = metering::observe(response, ticket, streaming);
+    let response = if streaming && response.status().is_success() {
+        metering::observe(
+            redact_stream(
+                response,
+                profile.credential.clone(),
+                registry.local_token.clone(),
+            ),
+            ticket.take(),
+            true,
+        )
+    } else {
+        response
+    };
+    let forwarded = forwarding_response_headers(response.headers());
     if !response.status().is_success() {
         let status = response.status();
         let bytes = tokio::time::timeout(
@@ -195,7 +208,7 @@ async fn serve(
         let detail = bytes.as_deref().and_then(|bytes| {
             upstream_error_detail(bytes, &profile.credential, &registry.local_token)
         });
-        return error(
+        let mut result = error(
             status,
             match detail {
                 Some(detail) => format!("Provider returned HTTP {status}: {detail}"),
@@ -204,10 +217,14 @@ async fn serve(
                 ),
             },
         );
+        result.headers_mut().extend(forwarded);
+        return result;
     }
     if streaming {
         if native {
-            return native_stream(response);
+            let mut result = native_stream(response);
+            result.headers_mut().extend(forwarded);
+            return result;
         }
         // Reuse the existing Chat -> Messages stream translator, then emit Responses events.
         let intermediate = if profile.api_format == ApiFormat::Anthropic {
@@ -215,24 +232,37 @@ async fn serve(
         } else {
             stream_response(response, profile.api_format)
         };
-        return converted_stream(intermediate, strip_1m(&model), custom, namespaces);
+        let mut result = converted_stream(intermediate, strip_1m(&model), custom, namespaces);
+        result.headers_mut().extend(forwarded);
+        result.headers_mut().insert(
+            header::CONTENT_TYPE,
+            header::HeaderValue::from_static("text/event-stream"),
+        );
+        return result;
     }
-    let bytes =
-        match tokio::time::timeout(TOTAL_TIMEOUT, read_body(response, BODY_LIMIT, false)).await {
-            Ok(Ok(v)) => v,
-            _ => {
-                return error(
-                    StatusCode::BAD_GATEWAY,
-                    "Upstream body failed or exceeded limits",
-                );
-            }
-        };
-    let value: Value = match serde_json::from_slice(&bytes) {
-        Ok(v) => v,
-        Err(_) => return error(StatusCode::BAD_GATEWAY, "Invalid upstream JSON"),
+    let value = match tokio::time::timeout(
+        TOTAL_TIMEOUT,
+        metering::read_observed_body(response, ticket.take(), state.limits.resources.body_bytes()),
+    )
+    .await
+    {
+        Ok(Ok((_, Some(value)))) => value,
+        Ok(Ok((_, None))) => return error(StatusCode::BAD_GATEWAY, "Invalid upstream JSON"),
+        _ => {
+            return error(
+                StatusCode::BAD_GATEWAY,
+                "Upstream body failed or exceeded limits",
+            );
+        }
     };
     if native {
-        return Json(value).into_response();
+        let mut result = Json(value).into_response();
+        result.headers_mut().extend(forwarded);
+        result.headers_mut().insert(
+            header::CONTENT_TYPE,
+            header::HeaderValue::from_static("application/json"),
+        );
+        return result;
     }
     let message = if profile.api_format == ApiFormat::Anthropic {
         value
@@ -245,7 +275,13 @@ async fn serve(
     match from_message(&message, &custom) {
         Ok(mut v) => {
             restore_namespaces(&mut v, &namespaces);
-            Json(v).into_response()
+            let mut result = Json(v).into_response();
+            result.headers_mut().extend(forwarded);
+            result.headers_mut().insert(
+                header::CONTENT_TYPE,
+                header::HeaderValue::from_static("application/json"),
+            );
+            result
         }
         Err(e) => error(StatusCode::BAD_GATEWAY, e),
     }
@@ -263,43 +299,7 @@ fn apply_chat_reasoning(body: &Value, upstream: &mut Value) {
     }
 }
 
-fn upstream_error_detail(
-    bytes: &[u8],
-    credential: &Credential,
-    local_token: &str,
-) -> Option<String> {
-    let value: Value = serde_json::from_slice(bytes).ok()?;
-    let upstream = value.get("error").unwrap_or(&value);
-    let message = upstream.get("message")?.as_str()?;
-    if message.trim().is_empty() {
-        return None;
-    }
-    // Extract only useful diagnostics, never headers, full bodies or HTML pages.
-    let mut detail = match upstream
-        .get("param")
-        .and_then(Value::as_str)
-        .filter(|p| !p.is_empty())
-    {
-        Some(param) => format!("{param}: {message}"),
-        None => message.to_owned(),
-    };
-    let secret = match credential {
-        Credential::Bearer { value }
-        | Credential::XApiKey { value }
-        | Credential::ApiKey { value } => value.as_str(),
-        Credential::None => "",
-    };
-    for secret in [secret, local_token] {
-        if !secret.is_empty() {
-            detail = detail.replace(secret, "[redacted]");
-        }
-    }
-    let clean: String = detail
-        .chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
-        .collect();
-    Some(truncate_utf8(&clean, 1024).to_owned())
-}
+use crate::diagnostics::detail as upstream_error_detail;
 type Namespaces = HashMap<String, (String, String)>;
 fn namespace_alias(namespace: &str, name: &str) -> String {
     use sha2::{Digest, Sha256};
@@ -1037,6 +1037,8 @@ mod tests {
             fs::write(
                 &registry,
                 serde_json::to_vec(&Registry {
+                    resources: Default::default(),
+                    resource_config: None,
                     listen: "127.0.0.1:1".into(),
                     local_token: "local-only".into(),
                     routes: BTreeMap::from([(
@@ -1056,6 +1058,7 @@ mod tests {
             )
             .unwrap();
             let state = ServerState {
+                limits: limits::Limits::new(Default::default()),
                 sessions: Default::default(),
                 shutdown: Default::default(),
                 usage: crate::usage::Writer::new(registry.with_file_name(crate::usage::FILE)),

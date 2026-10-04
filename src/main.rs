@@ -2,6 +2,7 @@ mod claude_config;
 mod claude_preferences;
 mod codex;
 mod config;
+mod diagnostics;
 mod discovery;
 mod grok;
 mod herdr_install;

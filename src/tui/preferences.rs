@@ -114,9 +114,20 @@ impl PreferencesForm {
 
 impl App {
     pub(super) fn open_preferences(&mut self) {
-        if self.pi_enabled || self.codex_ui.enabled {
+        if self.settings_menu.is_none() && (self.pi_enabled || self.codex_ui.enabled) {
             return;
         }
+        let configured = if self.settings_menu.is_some() {
+            match config::load(&self.paths.config) {
+                Ok(config) => config.claude,
+                Err(error) => {
+                    self.set_error(format!("Could not read Claude preferences: {error}"));
+                    return;
+                }
+            }
+        } else {
+            self.config.claude.clone()
+        };
         match claude_config::settings_path().and_then(|path| {
             if path.exists() {
                 Ok(serde_json::from_slice(&std::fs::read(path)?)?)
@@ -126,8 +137,7 @@ impl App {
         }) {
             Ok(current) => {
                 self.modal = Some(Modal::Preferences(PreferencesForm::new(
-                    self.config.claude.clone(),
-                    current,
+                    configured, current,
                 )))
             }
             Err(e) => self.set_error(format!("Could not read Claude settings: {e:#}")),
@@ -188,7 +198,7 @@ impl App {
                 return false;
             }
             let result = form.settings().and_then(|edited| {
-                self.update_client_config(|latest| {
+                let edit = |latest: &mut Config| {
                     // Merge unrelated preference edits; report conflicts without exposing values.
                     let mut merged = latest.claude.clone();
                     let keys: BTreeSet<_> =
@@ -223,11 +233,20 @@ impl App {
                     }
                     latest.claude = merged;
                     Ok(())
-                })
+                };
+                if self.settings_menu.is_some() {
+                    config::try_update(&self.paths.config, edit)
+                } else {
+                    self.update_client_config(edit)
+                }
             });
             match result {
                 Ok(config) => {
-                    self.config = config;
+                    if self.settings_menu.is_some() {
+                        self.config.claude = config.claude;
+                    } else {
+                        self.config = config;
+                    }
                     self.status = "Claude settings saved · pending sync · p connects · restart Claude for startup settings".into();
                     self.status_error = false;
                     self.queue_sync(false, None);
@@ -262,11 +281,27 @@ impl App {
 }
 
 pub(super) fn draw_preferences(frame: &mut ratatui::Frame, area: Rect, form: &PreferencesForm) {
+    let mut compact_fields = form.fields.clone();
+    if area.width < 55 {
+        for field in &mut compact_fields {
+            field.label = match field.label {
+                "AI attribution" => "Attribution",
+                "Disable updates" => "Auto-update",
+                "Disable Artifact" => "Artifacts",
+                "Variable name" => "Variable",
+                other => other,
+            };
+        }
+    }
     draw_form(
         frame,
         area,
-        " Claude settings · Ctrl+S save · Esc back ",
-        &form.fields,
+        if area.width < 55 {
+            " Claude settings "
+        } else {
+            " Claude settings · Ctrl+S save · Esc back "
+        },
+        &compact_fields,
         form.selected,
         false,
     );
@@ -297,9 +332,20 @@ pub(super) fn draw_preferences(frame: &mut ratatui::Frame, area: Rect, form: &Pr
         Paragraph::new(vec![Line::raw(status)]),
         Rect::new(inner.x, inner.bottom().saturating_sub(4), inner.width, 2),
     );
-    for ((label, _), rect) in [("Delete", 'd'), ("Show", 'v'), ("Disconnect", 'x')]
-        .into_iter()
-        .zip(preference_actions(area))
+    for ((label, _), rect) in [
+        ("Delete", 'd'),
+        ("Show", 'v'),
+        (
+            if area.width < 55 {
+                "Unlink"
+            } else {
+                "Disconnect"
+            },
+            'x',
+        ),
+    ]
+    .into_iter()
+    .zip(preference_actions(area))
     {
         frame.render_widget(
             Paragraph::new(format!("[{label}]")).style(button_style(
@@ -318,7 +364,7 @@ pub(super) fn draw_preferences(frame: &mut ratatui::Frame, area: Rect, form: &Pr
         } else if form.return_theme.is_some() {
             &["Presets", "Add", "Save", "Themes"]
         } else if area.width < 55 {
-            &["Presets", "Add", "Save", "Back"]
+            &["Fill", "Add", "Save", "Back"]
         } else {
             &["Fill presets", "Add variable", "Save", "Cancel"]
         },

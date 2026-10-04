@@ -4,6 +4,7 @@ impl App {
         if self.pi_enabled {
             crate::pi::native::load(&self.pi_home).map(|mut config| {
                 config.usage_refresh_secs = self.config.usage_refresh_secs;
+                config.ui = self.config.ui.clone();
                 config
             })
         } else {
@@ -18,6 +19,7 @@ impl App {
         if self.pi_enabled {
             crate::pi::native::update(&self.pi_home, edit).map(|mut config| {
                 config.usage_refresh_secs = self.config.usage_refresh_secs;
+                config.ui = self.config.ui.clone();
                 config
             })
         } else {

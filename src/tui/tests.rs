@@ -1,4 +1,351 @@
+#[test]
+fn settings_workspace_retains_drafts_and_requires_explicit_save() {
+    let (_temp, mut app) = persisted_app();
+    let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+    app.open_settings_menu();
+    app.handle_key(key(KeyCode::Char(']'))).unwrap();
+    app.handle_key(key(KeyCode::Enter)).unwrap();
+    app.handle_key(key(KeyCode::Down)).unwrap();
+    app.handle_key(key(KeyCode::Right)).unwrap();
+    assert!(!config::load(&app.paths.config).unwrap().ui.pulse_visual);
+    app.handle_key(key(KeyCode::Char(']'))).unwrap();
+    app.handle_key(key(KeyCode::Char('['))).unwrap();
+    let Some(Modal::SettingsMenu(menu)) = &app.modal else {
+        panic!()
+    };
+    assert!(menu.draft.pulse_visual && menu.dirty());
+    app.select_client_tab(ClientTab::Codex);
+    assert!(matches!(app.modal, Some(Modal::SettingsMenu(_))));
+    config::try_update(&app.paths.config, |c| {
+        c.ui.claude_new_model_1m = false;
+        Ok(())
+    })
+    .unwrap();
+    app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
+        .unwrap();
+    let saved = config::load(&app.paths.config).unwrap();
+    assert!(saved.ui.pulse_visual);
+    assert!(!saved.ui.claude_new_model_1m);
+    let Some(Modal::SettingsMenu(menu)) = &app.modal else {
+        panic!()
+    };
+    assert!(!menu.dirty());
+    assert_eq!(menu.selected, 1);
+}
+
+#[test]
+fn settings_workspace_mouse_edits_and_saves_on_narrow_screens() {
+    let (_temp, mut app) = persisted_app();
+    let screen = Rect::new(0, 0, 40, 12);
+    app.open_settings_menu();
+    app.handle_key(KeyEvent::new(KeyCode::Char(']'), KeyModifiers::NONE))
+        .unwrap();
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    let Some(Modal::SettingsMenu(menu)) = &app.modal else {
+        panic!()
+    };
+    let row = settings::settings_fields(settings_page_area(screen), menu)[1].1;
+    let click = |r: Rect| MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: r.x + 1,
+        row: r.y,
+        modifiers: KeyModifiers::NONE,
+    };
+    app.handle_mouse(click(row), screen).unwrap();
+    app.handle_mouse(
+        click(modal_button_rects(settings_page_area(screen), 2)[0]),
+        screen,
+    )
+    .unwrap();
+    assert!(config::load(&app.paths.config).unwrap().ui.pulse_visual);
+}
+
 use super::*;
+
+#[test]
+fn settings_client_editors_use_the_right_pane_and_keep_mouse_targets() {
+    let (_temp, mut app) = persisted_app();
+    let screen = Rect::new(0, 0, 120, 30);
+    app.open_settings_menu();
+    app.open_settings_section(4);
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+    terminal.draw(|frame| app.draw(frame)).unwrap();
+    let pane = settings::client_editor_area(screen);
+    assert!(pane.x > 20);
+    assert_eq!(terminal.backend().buffer()[(pane.x, pane.y)].symbol(), "┌");
+    let row = settings::settings_rows(settings_page_area(screen), 4)
+        .into_iter()
+        .find(|(index, _)| *index == 6)
+        .unwrap()
+        .1;
+    app.handle_mouse(
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: row.x + 2,
+            row: row.y,
+            modifiers: KeyModifiers::NONE,
+        },
+        screen,
+    )
+    .unwrap();
+    assert!(matches!(app.modal, Some(Modal::Grok(_))));
+    terminal.draw(|frame| app.draw(frame)).unwrap();
+    assert_eq!(terminal.backend().buffer()[(pane.x, pane.y)].symbol(), "┌");
+    let narrow = Rect::new(0, 0, 40, 12);
+    assert_eq!(
+        settings::client_editor_area(narrow),
+        settings_page_area(narrow)
+    );
+}
+
+#[test]
+fn settings_proxy_uses_the_right_pane_and_sidebar_navigation() {
+    let (_temp, mut app) = persisted_app();
+    let screen = Rect::new(0, 0, 120, 30);
+    app.open_settings_menu();
+    app.open_settings_section(7);
+    let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+    terminal.draw(|frame| app.draw(frame)).unwrap();
+    let pane = settings::client_editor_area(screen);
+    assert_eq!(terminal.backend().buffer()[(pane.x, pane.y)].symbol(), "┌");
+    let text = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(text.contains("PREFERENCES") && text.contains("Proxy service"));
+    let row = settings::settings_rows(settings_page_area(screen), 7)
+        .into_iter()
+        .find(|(index, _)| *index == 4)
+        .unwrap()
+        .1;
+    app.handle_mouse(
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: row.x + 2,
+            row: row.y,
+            modifiers: KeyModifiers::NONE,
+        },
+        screen,
+    )
+    .unwrap();
+    assert!(matches!(app.modal, Some(Modal::Preferences(_))));
+    let narrow = Rect::new(0, 0, 40, 12);
+    assert_eq!(
+        settings::client_editor_area(narrow),
+        settings_page_area(narrow)
+    );
+}
+
+#[test]
+fn settings_menu_centralizes_client_preferences_without_switching_client() {
+    let (_temp, mut app) = persisted_app();
+    let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+    app.select_client_tab(ClientTab::Codex);
+    app.handle_key(key(KeyCode::F(4))).unwrap();
+    assert!(matches!(app.modal, Some(Modal::SettingsMenu(_))));
+    app.open_settings_section(4);
+    let Some(Modal::Preferences(form)) = &mut app.modal else {
+        panic!("Claude settings should open from any client");
+    };
+    form.fields[0].value = "hide".into();
+    app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
+        .unwrap();
+    assert!(matches!(app.modal, Some(Modal::SettingsMenu(_))));
+    assert_eq!(app.config_tab(), ClientTab::Codex);
+    assert_eq!(
+        config::load(&app.paths.config)
+            .unwrap()
+            .claude
+            .hide_attribution,
+        Some(true)
+    );
+
+    app.open_settings_section(5);
+    assert!(matches!(app.modal, Some(Modal::CodexSettings(_))));
+    app.handle_key(key(KeyCode::Right)).unwrap();
+    app.handle_key(key(KeyCode::Enter)).unwrap();
+    assert_eq!(
+        config::load(&app.paths.config)
+            .unwrap()
+            .codex
+            .reasoning_effort
+            .as_deref(),
+        Some("high")
+    );
+    assert!(matches!(app.modal, Some(Modal::SettingsMenu(_))));
+
+    app.open_settings_section(6);
+    let Some(Modal::Grok(dialog)) = &mut app.modal else {
+        panic!("Grok settings expected");
+    };
+    let grok::Dialog::Settings { fields, .. } = dialog.as_mut() else {
+        panic!("Grok settings expected");
+    };
+    fields[5].value = "true".into();
+    app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
+        .unwrap();
+    assert!(matches!(app.modal, Some(Modal::SettingsMenu(_))));
+    assert_eq!(app.config_tab(), ClientTab::Codex);
+    assert_eq!(
+        config::load(&app.paths.config)
+            .unwrap()
+            .grok
+            .preferences
+            .compact_mode,
+        Some(true)
+    );
+    assert!(app.background.queued_sync.is_none());
+}
+
+#[test]
+fn settings_menu_scrolls_and_clicks_on_narrow_screens() {
+    let (_temp, mut app) = persisted_app();
+    let screen = Rect::new(0, 0, 40, 12);
+    app.open_settings_menu();
+    for _ in 0..7 {
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+            .unwrap();
+    }
+    let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
+    terminal.draw(|frame| app.draw(frame)).unwrap();
+    let text = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(text.contains("Proxy"));
+    let Some(Modal::SettingsMenu(menu)) = &app.modal else {
+        panic!("Settings menu expected");
+    };
+    let (_, row) = settings::settings_rows(settings_page_area(screen), menu.selected)
+        .into_iter()
+        .find(|(index, _)| *index == 7)
+        .unwrap();
+    app.handle_mouse(
+        MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: row.x + 2,
+            row: row.y,
+            modifiers: KeyModifiers::NONE,
+        },
+        screen,
+    )
+    .unwrap();
+    assert!(matches!(app.modal, Some(Modal::Proxy(_))));
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+        .unwrap();
+    assert!(matches!(app.modal, Some(Modal::SettingsMenu(_))));
+}
+
+#[test]
+fn settings_defaults_save_and_apply_only_to_new_model_forms() {
+    let (_temp, mut app) = persisted_app();
+    app.open_settings_menu();
+    app.open_settings_section(3);
+    let Some(Modal::UiOptions(options)) = &mut app.modal else {
+        panic!("new model defaults expected");
+    };
+    options.edited.claude_new_model_1m = false;
+    options.edited.claude_new_model_enabled = false;
+    options.edited.codex_new_model_enabled = false;
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    assert!(matches!(app.modal, Some(Modal::SettingsMenu(_))));
+    let saved = config::load(&app.paths.config).unwrap();
+    assert!(!saved.ui.claude_new_model_1m && !saved.ui.codex_new_model_enabled);
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+        .unwrap();
+    app.open_add_model_modal();
+    let Some(Modal::Model(form)) = &app.modal else {
+        panic!("model form expected");
+    };
+    assert_eq!(form.fields[3].value, "false");
+    assert_eq!(
+        form.fields
+            .iter()
+            .find(|field| field.label == "Enable now")
+            .unwrap()
+            .value,
+        "false"
+    );
+    app.modal = None;
+    app.select_client_tab(ClientTab::Codex);
+    app.open_add_model_modal();
+    let Some(Modal::Model(form)) = &app.modal else {
+        panic!("Codex model form expected");
+    };
+    assert_eq!(form.fields[3].value, "false");
+    assert_eq!(
+        form.fields
+            .iter()
+            .find(|field| field.label == "Enable now")
+            .unwrap()
+            .value,
+        "false"
+    );
+}
+
+#[test]
+fn settings_defaults_conflict_keeps_the_draft() {
+    let (_temp, mut app) = persisted_app();
+    app.open_settings_menu();
+    app.open_settings_section(3);
+    let Some(Modal::UiOptions(options)) = &mut app.modal else {
+        panic!("new model defaults expected");
+    };
+    options.edited.claude_new_model_1m = false;
+    config::try_update(&app.paths.config, |latest| {
+        latest.ui.pulse_models = true;
+        Ok(())
+    })
+    .unwrap();
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    assert!(
+        matches!(&app.modal, Some(Modal::UiOptions(options)) if !options.edited.claude_new_model_1m && options.error.is_some())
+    );
+    let saved = config::load(&app.paths.config).unwrap();
+    assert!(saved.ui.claude_new_model_1m && saved.ui.pulse_models);
+}
+
+#[test]
+fn pulse_settings_keep_theme_draft_and_store_display_defaults() {
+    let (_temp, mut app) = persisted_app();
+    app.open_settings_menu();
+    app.open_settings_section(1);
+    let Some(Modal::Appearance(form)) = &mut app.modal else {
+        panic!("Pulse theme expected");
+    };
+    assert!(form.pulse_selected);
+    form.theme = theme::Theme::Moss;
+    app.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE))
+        .unwrap();
+    let Some(Modal::UiOptions(options)) = &mut app.modal else {
+        panic!("Pulse display expected");
+    };
+    options.edited.pulse_visual = true;
+    options.edited.pulse_models = true;
+    options.edited.pulse_start_page = config::PulseStartPage::Sessions;
+    options.edited.pulse_sort_tokens = true;
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    assert!(
+        matches!(app.modal, Some(Modal::Appearance(ref form)) if form.theme == theme::Theme::Moss)
+    );
+    let saved = config::load(&app.paths.config).unwrap();
+    assert!(saved.ui.pulse_visual && saved.ui.pulse_models && saved.ui.pulse_sort_tokens);
+    assert_eq!(saved.ui.pulse_start_page, config::PulseStartPage::Sessions);
+    app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+        .unwrap();
+    assert!(matches!(app.modal, Some(Modal::SettingsMenu(_))));
+    assert_eq!(app.theme, theme::Theme::Classic);
+}
 use ratatui::{Terminal, backend::TestBackend};
 
 #[test]
@@ -174,6 +521,32 @@ fn fullscreen_visual_capture() {
         } else if name.starts_with("grok") {
             assert!(text.contains("Grok accounts"));
             assert!(text.contains("Account configuration"));
+        } else if name.starts_with("workspace-pulse") {
+            assert!(text.contains("Model details"));
+        } else if name.starts_with("settings-client-claude") {
+            assert!(
+                text.contains(if width == 40 {
+                    "Attribution"
+                } else {
+                    "AI attribution"
+                }),
+                "{name}"
+            );
+        } else if name.starts_with("settings-client-grok") {
+            assert!(
+                text.contains(if width == 40 {
+                    "Default"
+                } else {
+                    "Default model"
+                }),
+                "{name}"
+            );
+        } else if name.starts_with("settings-client-proxy") {
+            assert!(text.contains("Proxy service"), "{name}");
+        } else if name.starts_with("settings-menu") {
+            assert!(text.contains("New models"));
+        } else if name.starts_with("settings-options") {
+            assert!(text.contains("Claude 1M"));
         } else if name.starts_with("settings-refresh") {
             assert!(text.contains("Usage refresh"));
         } else if name.starts_with("settings") {
@@ -248,6 +621,33 @@ fn fullscreen_visual_capture() {
     capture("grok-120x30", &mut grok, 120, 30);
     capture("grok-120x24", &mut grok, 120, 24);
     let (_temp, mut settings) = persisted_app();
+    settings.open_settings_menu();
+    capture("settings-menu-120x30", &mut settings, 120, 30);
+    capture("settings-menu-40x12", &mut settings, 40, 12);
+    settings.open_settings_section(4);
+    capture("settings-client-claude-120x30", &mut settings, 120, 30);
+    capture("settings-client-claude-40x12", &mut settings, 40, 12);
+    settings.return_settings_menu();
+    settings.open_settings_section(6);
+    capture("settings-client-grok-120x30", &mut settings, 120, 30);
+    capture("settings-client-grok-40x12", &mut settings, 40, 12);
+    settings.return_settings_menu();
+    settings.open_settings_section(7);
+    capture("settings-client-proxy-120x30", &mut settings, 120, 30);
+    capture("settings-client-proxy-40x12", &mut settings, 40, 12);
+    settings.return_settings_menu();
+    settings.open_settings_menu();
+    settings
+        .handle_key(KeyEvent::new(KeyCode::Char(']'), KeyModifiers::NONE))
+        .unwrap();
+    settings
+        .handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    capture("workspace-pulse-120x30", &mut settings, 120, 30);
+    capture("workspace-pulse-40x12", &mut settings, 40, 12);
+    settings.open_settings_section(3);
+    capture("settings-options-40x12", &mut settings, 40, 12);
+    settings.return_settings_menu();
     settings.open_appearance();
     capture("settings-200x44", &mut settings, 200, 44);
     settings
@@ -266,7 +666,7 @@ fn tui_theme_preview_cancel_save_and_restart_do_not_touch_provider_config() {
     app.theme = theme::Theme::Slate;
     let before = std::fs::read(&app.paths.config).unwrap();
     let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
-    app.handle_key(key(KeyCode::F(4))).unwrap();
+    app.open_appearance();
     app.handle_key(key(KeyCode::Down)).unwrap();
     let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
     terminal.draw(|frame| app.draw(frame)).unwrap();
@@ -281,7 +681,7 @@ fn tui_theme_preview_cancel_save_and_restart_do_not_touch_provider_config() {
     assert_eq!(app.theme, theme::Theme::Slate);
     app.handle_key(key(KeyCode::Esc)).unwrap();
     assert!(!app.paths.state_dir.join("tui-theme.json").exists());
-    app.handle_key(key(KeyCode::F(4))).unwrap();
+    app.open_appearance();
     app.handle_key(key(KeyCode::Down)).unwrap();
     app.handle_key(key(KeyCode::Enter)).unwrap();
     assert_eq!(app.theme, theme::Theme::Moss);
@@ -303,8 +703,7 @@ fn tui_theme_settings_mouse_and_keyboard_work_on_every_client() {
         ClientTab::Usage,
     ] {
         app.select_client_tab(tab);
-        app.handle_key(KeyEvent::new(KeyCode::F(4), KeyModifiers::NONE))
-            .unwrap();
+        app.open_appearance();
         assert!(matches!(app.modal, Some(Modal::Appearance(_))));
         let area = modal_area_for(app.modal.as_ref().unwrap(), screen);
         let row = theme::rows(
@@ -339,7 +738,7 @@ fn usage_refresh_setting_saves_and_updates_usage_overview() {
     let (_temp, mut app) = persisted_app();
     let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
     assert_eq!(app.config.usage_refresh_secs, 2);
-    app.handle_key(key(KeyCode::F(4))).unwrap();
+    app.open_appearance();
     app.handle_key(key(KeyCode::Tab)).unwrap();
     app.handle_key(key(KeyCode::Tab)).unwrap();
     app.handle_key(key(KeyCode::Right)).unwrap();
@@ -368,7 +767,7 @@ fn usage_refresh_setting_saves_and_updates_usage_overview() {
     assert!(text.contains("scroll"), "{text}");
     assert!(text.contains("/ 3s"), "{text}");
 
-    app.handle_key(key(KeyCode::F(4))).unwrap();
+    app.open_appearance();
     app.handle_key(key(KeyCode::Tab)).unwrap();
     app.handle_key(key(KeyCode::Tab)).unwrap();
     let mut small = Terminal::new(TestBackend::new(40, 12)).unwrap();
@@ -867,6 +1266,7 @@ fn renders_empty_state_in_narrow_terminal() {
         status: "Ready".into(),
         status_error: false,
         modal: None,
+        settings_menu: None,
         help_return: None,
         proxy_status: None,
         provider_editor: None,
@@ -1351,6 +1751,9 @@ fn proxy_manager_renders_and_supports_keyboard_and_mouse_navigation() {
     app.modal = Some(Modal::Proxy(ProxyManager {
         return_appearance: None,
         port_field: None,
+        resource_fields: None,
+        resource_original: None,
+        resource_selected: 0,
         port_changed: false,
         instance: uuid::Uuid::new_v4(),
         runtime: Some(proxy::ProxyStatus {
@@ -1361,6 +1764,7 @@ fn proxy_manager_renders_and_supports_keyboard_and_mouse_navigation() {
         }),
         service: Some(proxy::ProxyServiceStatus {
             installed: true,
+            loaded: Some(true),
             manager: "launchd",
             path: PathBuf::from("/tmp/com.mux.proxy.plist"),
         }),
@@ -2211,6 +2615,7 @@ fn interactive_test_app() -> App {
         status: "Ready".into(),
         status_error: false,
         modal: None,
+        settings_menu: None,
         help_return: None,
         proxy_status: None,
         provider_editor: None,
@@ -4199,7 +4604,7 @@ fn grok_tabs_import_settings_sync_and_client_isolation() {
     app.handle_key(key(KeyCode::Char('p'))).unwrap();
     assert!(crate::grok::connected(&app.paths));
     assert!(!app.status_error, "{}", app.status);
-    app.handle_key(key(KeyCode::F(4))).unwrap();
+    app.open_appearance();
     app.handle_key(key(KeyCode::Char('c'))).unwrap();
     if let Some(Modal::Grok(dialog)) = app.modal.as_mut() {
         if let grok::Dialog::Settings { fields, .. } = dialog.as_mut() {
@@ -4847,4 +5252,129 @@ fn appearance_save_preserves_client_scope_and_refresh_draft() {
     app.select_client_tab(ClientTab::Pi);
     assert_eq!(app.config.usage_refresh_secs, 3);
     assert_eq!(app.load_client_config().unwrap().usage_refresh_secs, 3);
+}
+
+#[test]
+fn pi_global_settings_use_persisted_codex_reasoning() {
+    let (_temp, mut app) = persisted_app();
+    app.config = config::try_update(&app.paths.config, |c| {
+        c.codex.reasoning_effort = Some("high".into());
+        Ok(())
+    })
+    .unwrap();
+    app.select_client_tab(ClientTab::Pi);
+    assert!(app.pi_enabled);
+    app.open_settings_menu();
+    assert_eq!(app.config.codex.reasoning_effort.as_deref(), Some("high"));
+    for _ in 0..5 {
+        app.handle_key(KeyEvent::new(KeyCode::Char(']'), KeyModifiers::NONE))
+            .unwrap();
+    }
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))
+        .unwrap();
+    app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
+        .unwrap();
+    assert_eq!(
+        config::load(&app.paths.config)
+            .unwrap()
+            .codex
+            .reasoning_effort
+            .as_deref(),
+        Some("medium")
+    );
+    let Some(Modal::SettingsMenu(menu)) = &app.modal else {
+        panic!()
+    };
+    assert!(!menu.dirty());
+}
+
+#[test]
+fn settings_partial_save_retains_failed_theme_draft_and_retries() {
+    let (_temp, mut app) = persisted_app();
+    app.open_settings_menu();
+    app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+        .unwrap();
+    app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))
+        .unwrap();
+    std::fs::create_dir_all(app.paths.state_dir.join("tui-theme.json")).unwrap();
+    app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
+        .unwrap();
+    let Some(Modal::SettingsMenu(menu)) = &app.modal else {
+        panic!()
+    };
+    assert!(menu.dirty());
+    assert!(
+        menu.message
+            .as_deref()
+            .unwrap()
+            .contains("Partially saved: preferences")
+    );
+    let edited = menu.theme;
+    std::fs::remove_dir(app.paths.state_dir.join("tui-theme.json")).unwrap();
+    app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
+        .unwrap();
+    let Some(Modal::SettingsMenu(menu)) = &app.modal else {
+        panic!()
+    };
+    assert!(!menu.dirty());
+    assert_eq!(theme::Theme::load(&app.paths), edited);
+}
+
+#[test]
+fn proxy_resource_editor_validates_merges_and_renders_narrow_forms() {
+    let (_temp, app) = persisted_app();
+    let mut manager = ProxyManager::empty();
+    manager.edit_resources(&app.paths).unwrap();
+    manager.resource_fields.as_mut().unwrap()[0].value = "0".into();
+    assert!(manager.save_resources(&app.paths).is_err());
+    assert!(manager.resource_fields.is_some());
+    manager.resource_fields.as_mut().unwrap()[0].value = "8".into();
+    config::try_update(&app.paths.config, |c| {
+        c.proxy.max_body_mib = 16;
+        Ok(())
+    })
+    .unwrap();
+    manager.save_resources(&app.paths).unwrap();
+    let saved = config::load(&app.paths.config).unwrap();
+    assert_eq!(
+        (saved.proxy.max_inflight, saved.proxy.max_body_mib),
+        (8, 16)
+    );
+    assert!(manager.message.contains("Stop and Start"));
+    manager.edit_resources(&app.paths).unwrap();
+    for (width, height) in [(40, 12), (80, 24)] {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|frame| draw_proxy_manager(frame, frame.area(), &manager, "Claude", true))
+            .unwrap();
+        let text = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert!(
+            text.contains("Requests") && text.contains("Token tasks") && text.contains("Body MiB")
+        );
+    }
+    manager.resource_fields.as_mut().unwrap()[0].value = "10".into();
+    config::try_update(&app.paths.config, |c| {
+        c.proxy.max_inflight = 12;
+        Ok(())
+    })
+    .unwrap();
+    assert!(
+        manager
+            .save_resources(&app.paths)
+            .unwrap_err()
+            .to_string()
+            .contains("changed elsewhere")
+    );
+    assert_eq!(
+        config::load(&app.paths.config).unwrap().proxy.max_inflight,
+        12
+    );
 }
