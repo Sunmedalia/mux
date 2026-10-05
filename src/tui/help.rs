@@ -303,6 +303,7 @@ pub(super) fn help_commands(section: HelpSection) -> &'static [(&'static str, &'
                 "Codex r / w",
                 "Refresh usage / wake account and refresh (uses some quota)",
             ),
+            ("Codex R", "Redeem one reset card (confirmation)"),
             ("Codex s / D", "Local status / disconnect (confirmation)"),
             (
                 "Codex Esc",

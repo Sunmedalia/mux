@@ -152,6 +152,7 @@ Codex 首页依次显示 **All Models**、**ChatGPT Account** 和 API 提供商�
 | `p` / Apply Codex | 应用当前高亮账号，同时切换为 ChatGPT 提供商 |
 | `r` / Refresh | 刷新选中账号的额度 |
 | `w` / Wake | 唤醒选中账号并刷新额度 |
+| `R` / Reset | 查询所选账号的重置卡，二次确认后兑换一张并刷新额度 |
 | `Esc` / Back | 返回提供商列表 |
 | `?` | 与 Claude 一致的分栏 Help：Providers / Accounts / Models / Forms |
 
@@ -281,3 +282,5 @@ Anthropic 转发保留原生 Tool Search 内容。OpenAI Chat / Responses 使用
 模型编辑页新增 **Reasoning max**：`off / low / medium / high / xhigh`，默认 `high`，配置字段为 `reasoning_max`。转到 OpenAI 时，`max` 映射为该模型的上限，其他等级超过上限时下调，`off` 不发送推理参数。Chat 使用 `reasoning_effort`，Responses 使用 `reasoning.effort`；Anthropic 不改变原始等级。上游拒绝参数时不会暗中降级重试。
 
 配置版本升级到 5；旧配置加载后默认不接管任何客户端偏好。升级后请勿使用只支持旧配置版本的 Mux 写回该文件。
+
+Codex Account 的 **Reset [R]** 使用账号获得的额度重置卡。先刷新所选账号，选择最早到期且可用的 Codex 重置卡，再显示账号名称、卡片标题和有效期。按 Enter / y 或点击 Confirm 才兑换；Esc / n 或 Cancel 取消。确认时会消耗一张卡，无法撤销。没有卡、卡片详情不可用或旧版 Codex 不支持时会显示错误。兑换使用隔离登录副本，不切换当前账号；失败或超时不自动重试，请先 Refresh 检查额度与卡片状态。成功兑换但刷新失败时会明确提示已兑换，避免重复使用。协议见 [官方 App Server 文档](https://learn.chatgpt.com/docs/app-server#8-earned-rate-limit-resets-chatgpt)。

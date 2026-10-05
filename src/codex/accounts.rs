@@ -460,16 +460,95 @@ pub fn remove(paths: &AppPaths, id: &str) -> Result<()> {
     Ok(())
 }
 pub fn refresh(paths: &AppPaths, id: &str) -> Result<()> {
-    refresh_inner(paths, id, false, false)
+    refresh_inner(paths, id, false, false, None)
 }
 pub fn wake(paths: &AppPaths, id: &str) -> Result<()> {
-    refresh_inner(paths, id, true, false)
+    refresh_inner(paths, id, true, false, None)
 }
 pub fn verify_for_switch(paths: &AppPaths, id: &str) -> Result<()> {
-    refresh_inner(paths, id, false, true)
+    refresh_inner(paths, id, false, true, None)
 }
-fn refresh_inner(paths: &AppPaths, id: &str, wake: bool, check_only: bool) -> Result<()> {
+#[derive(Clone)]
+pub struct ResetCredit {
+    pub id: String,
+    pub title: String,
+    pub expires_at: Option<u64>,
+}
+pub fn reset_credit(limits: &Value) -> Result<ResetCredit> {
+    let summary = &limits["rateLimitResetCredits"];
+    let rows = summary["credits"]
+        .as_array()
+        .context("Reset-card details unavailable; update Codex CLI or refresh again")?;
+    let credit = rows
+        .iter()
+        .filter(|credit| {
+            credit["status"] == "available"
+                && credit["resetType"] == "codexRateLimits"
+                && credit["id"].as_str().is_some_and(|id| !id.is_empty())
+                && credit["expiresAt"]
+                    .as_u64()
+                    .is_none_or(|expiry| expiry > now())
+        })
+        .min_by_key(|credit| credit["expiresAt"].as_u64().unwrap_or(u64::MAX))
+        .context("No available Codex reset cards")?;
+    Ok(ResetCredit {
+        id: credit["id"].as_str().unwrap().into(),
+        title: credit["title"]
+            .as_str()
+            .unwrap_or("Codex usage reset")
+            .chars()
+            .filter(|c| !c.is_control())
+            .take(100)
+            .collect(),
+        expires_at: credit["expiresAt"].as_u64(),
+    })
+}
+pub fn redeem_reset(paths: &AppPaths, id: &str, credit: &ResetCredit, attempt: &str) -> Result<()> {
+    uuid::Uuid::parse_str(attempt).context("Invalid reset attempt")?;
+    if credit.id.is_empty() {
+        bail!("Missing reset card");
+    }
+    refresh_inner(paths, id, false, false, Some((&credit.id, attempt)))
+}
+fn reset_and_read(
+    reset: Option<(&str, &str)>,
+    mut call: impl FnMut(&str, Value) -> Result<Value>,
+) -> Result<Value> {
+    if let Some((credit, attempt)) = reset {
+        let result = call(
+            "account/rateLimitResetCredit/consume",
+            json!({"creditId": credit, "idempotencyKey": attempt}),
+        )
+        .context(
+            "Reset result uncertain; refresh usage before another attempt. No automatic retry",
+        )?;
+        match result["outcome"].as_str() {
+            Some("reset" | "alreadyRedeemed") => {}
+            Some("nothingToReset") => bail!("No eligible usage window to reset"),
+            Some("noCredit") => bail!("No available reset card; refresh usage"),
+            _ => bail!("Unknown reset result; refresh usage before another attempt"),
+        }
+    }
+    let limits = call("account/rateLimits/read", json!({})).with_context(|| {
+        if reset.is_some() {
+            "Reset card redeemed, but usage refresh failed; press Refresh (r), do not redeem again"
+        } else {
+            "Could not refresh usage"
+        }
+    })?;
+    Ok(limits)
+}
+fn refresh_inner(
+    paths: &AppPaths,
+    id: &str,
+    wake: bool,
+    check_only: bool,
+    reset: Option<(&str, &str)>,
+) -> Result<()> {
     let _guard = lock(paths)?;
+    if !config::load(&paths.config)?.codex.accounts.contains_key(id) {
+        bail!("Account no longer exists");
+    }
     let home = home()?;
     let doc = document(&home)?;
     capture_current(paths, read_live_auth(&home, &doc)?.as_ref())?;
@@ -505,7 +584,7 @@ fn refresh_inner(paths: &AppPaths, id: &str, wake: bool, check_only: bool) -> Re
         if wake {
             client.wake()?;
         }
-        let limits = client.call("account/rateLimits/read", json!({}))?;
+        let limits = reset_and_read(reset, |method, params| client.call(method, params))?;
         Ok::<_, anyhow::Error>((info, Some(limits)))
     })();
     // Always retain refreshed tokens, even if the quota endpoint failed.
@@ -597,6 +676,11 @@ pub fn cached_summary(account: &Account) -> String {
         ),
         format!("Workspace: {}", account.workspace),
     ];
+    if let Some(count) = account.limits["rateLimitResetCredits"]["availableCount"].as_u64() {
+        lines.push(format!(
+            "Reset cards: {count} available · R redeem (confirm)"
+        ));
+    }
     let buckets = account.limits["rateLimitsByLimitId"]
         .as_object()
         .cloned()
@@ -765,5 +849,85 @@ mod usage_display_tests {
         assert!(summary.contains("Last refresh: 0 min ago"));
         account.error = Some("Refresh failed; cached limits may be stale".into());
         assert!(cached_summary(&account).contains("cached limits may be stale"));
+    }
+}
+
+#[cfg(test)]
+mod reset_tests {
+    use super::*;
+    #[test]
+    fn reset_cards_filter_expired_unknown_and_choose_earliest_expiry() {
+        let card = |id: &str, expiry: u64, status: &str, kind: &str| json!({"id":id,"expiresAt":expiry,"status":status,"resetType":kind});
+        let limits = json!({"rateLimitResetCredits":{"credits":[
+            card("expired",now()-1,"available","codexRateLimits"),
+            card("later",now()+100,"available","codexRateLimits"),
+            card("first",now()+50,"available","codexRateLimits"),
+            card("used",now()+1,"redeemed","codexRateLimits"),
+            card("unknown",now()+1,"available","unknown")
+        ]}});
+        assert_eq!(reset_credit(&limits).unwrap().id, "first");
+        assert!(
+            reset_credit(&json!({"rateLimitResetCredits":{"availableCount":2,"credits":null}}))
+                .is_err()
+        );
+        assert!(reset_credit(&json!({"rateLimitResetCredits":{"credits":[]}})).is_err());
+    }
+    #[test]
+    fn reset_rpc_consumes_once_then_refreshes_and_preserves_outcome_on_failure() {
+        for outcome in ["reset", "alreadyRedeemed"] {
+            let mut calls = Vec::new();
+            let limits = reset_and_read(Some(("card", "attempt")), |method, params| {
+                calls.push(method.to_owned());
+                if method.ends_with("consume") {
+                    assert_eq!(
+                        params,
+                        json!({"creditId":"card","idempotencyKey":"attempt"})
+                    );
+                    Ok(json!({"outcome":outcome}))
+                } else {
+                    Ok(json!({"rateLimitResetCredits":{"availableCount":0}}))
+                }
+            })
+            .unwrap();
+            assert_eq!(
+                calls,
+                [
+                    "account/rateLimitResetCredit/consume",
+                    "account/rateLimits/read"
+                ]
+            );
+            assert_eq!(limits["rateLimitResetCredits"]["availableCount"], 0);
+        }
+        for outcome in ["noCredit", "nothingToReset", "unknown"] {
+            let mut calls = 0;
+            assert!(
+                reset_and_read(Some(("card", "attempt")), |_, _| {
+                    calls += 1;
+                    Ok(json!({"outcome":outcome}))
+                })
+                .is_err()
+            );
+            assert_eq!(calls, 1);
+        }
+        let error = reset_and_read(Some(("card", "attempt")), |method, _| {
+            if method.ends_with("consume") {
+                Ok(json!({"outcome":"reset"}))
+            } else {
+                bail!("fixture failure")
+            }
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("redeemed"));
+        let mut calls = 0;
+        assert!(
+            reset_and_read(Some(("card", "attempt")), |_, _| {
+                calls += 1;
+                bail!("disconnected")
+            })
+            .unwrap_err()
+            .to_string()
+            .contains("uncertain")
+        );
+        assert_eq!(calls, 1);
     }
 }

@@ -8,6 +8,7 @@ use std::sync::{
 
 enum Update {
     Progress(String),
+    ResetReady(String, service::accounts::ResetCredit),
     Select(String),
     Login(Option<String>, String),
     Done(std::result::Result<String, String>),
@@ -21,6 +22,7 @@ enum Input {
     ImportFileName(std::path::PathBuf),
     Rename(String),
     Delete(String),
+    Reset(String, service::accounts::ResetCredit),
     Reasoning,
     Disconnect,
     Subscription(Option<String>),
@@ -238,6 +240,10 @@ impl App {
                         message
                     };
                 }
+                Update::ResetReady(id, credit) => {
+                    self.codex_ui.input = Some(Input::Reset(id, credit));
+                    self.codex_ui.field.clear();
+                }
                 Update::Select(id) => self.codex_ui.pending_selection = Some(id),
                 Update::Login(id, message) => {
                     self.codex_ui.live_id = id;
@@ -367,6 +373,17 @@ impl App {
             )
         });
     }
+    fn codex_input_area(&self, area: Rect) -> Rect {
+        if matches!(self.codex_ui.input, Some(Input::Reset(_, _))) {
+            centered_rect(
+                area.width.saturating_sub(4).min(72),
+                area.height.saturating_sub(2).min(12),
+                area,
+            )
+        } else {
+            account_input_area(area)
+        }
+    }
     fn codex_input(&mut self, input: Input, initial: String) {
         if self.codex_ui.busy {
             return;
@@ -417,12 +434,16 @@ impl App {
             }
             return Ok(Some(false));
         }
-        if let Some(input @ (Input::Subscription(_) | Input::Switch(_) | Input::Delete(_))) =
-            self.codex_ui.input.clone()
+        if let Some(
+            input @ (Input::Subscription(_)
+            | Input::Switch(_)
+            | Input::Delete(_)
+            | Input::Reset(_, _)),
+        ) = self.codex_ui.input.clone()
         {
             match key.code {
                 KeyCode::Esc | KeyCode::Char('n') => self.codex_ui.input = None,
-                KeyCode::Enter | KeyCode::Char('y') => {
+                KeyCode::Enter | KeyCode::Char('y') if !self.codex_ui.busy => {
                     self.codex_ui.input = None;
                     self.codex_job(move |paths, _, _| match input {
                         Input::Subscription(Some(id)) => {
@@ -436,6 +457,10 @@ impl App {
                         Input::Subscription(None) => {
                             service::disable_subscription(&paths)?;
                             Ok("ChatGPT disabled · previous API providers restored · restart Codex".into())
+                        }
+                        Input::Reset(id, credit) => {
+                            service::accounts::redeem_reset(&paths, &id, &credit, &uuid::Uuid::new_v4().to_string())?;
+                            Ok("Reset card redeemed · usage refreshed".into())
                         }
                         Input::Delete(id) => {
                             service::accounts::remove(&paths, &id)?;
@@ -523,7 +548,10 @@ impl App {
                             })?;
                             Ok("Reasoning saved · p apply to Codex".into())
                         }
-                        Input::Subscription(_) | Input::Switch(_) | Input::Delete(_) => {
+                        Input::Subscription(_)
+                        | Input::Switch(_)
+                        | Input::Delete(_)
+                        | Input::Reset(_, _) => {
                             unreachable!("handled by confirmation")
                         }
                         Input::Disconnect => {
@@ -653,6 +681,22 @@ impl App {
                     self.status = previous_status;
                 }
             }
+            KeyCode::Char('R') if !self.codex_ui.busy => {
+                if let Some(id) = self.selected_codex_account() {
+                    self.codex_job(move |paths, _, sender| {
+                        service::accounts::refresh(&paths, &id)?;
+                        let config = config::load(&paths.config)?;
+                        let account = config
+                            .codex
+                            .accounts
+                            .get(&id)
+                            .context("Account no longer exists")?;
+                        let credit = service::accounts::reset_credit(&account.limits)?;
+                        let _ = sender.send(Update::ResetReady(id, credit));
+                        Ok("Review reset card · confirmation required".into())
+                    });
+                }
+            }
             KeyCode::Char('w') if !self.codex_ui.busy => {
                 if let Some(id) = self.selected_codex_account() {
                     self.codex_ui.help_scroll = 0;
@@ -712,7 +756,7 @@ impl App {
         }
         if self.codex_ui.input.is_some() {
             if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
-                let popup = account_input_area(area);
+                let popup = self.codex_input_area(area);
                 if let Some(index) = modal_button_rects(popup, 2)
                     .iter()
                     .position(|rect| contains(*rect, mouse.column, mouse.row))
@@ -1055,6 +1099,7 @@ impl App {
             Input::ImportFileName(_) => "Import auth.json · Account label",
             Input::Rename(_) => "Edit account · Display name",
             Input::Delete(_) => "Delete saved account?",
+            Input::Reset(_, _) => "Use Codex reset card?",
             Input::ImportFile => "Import auth.json · File path",
             Input::Reasoning => "Reasoning: none/minimal/low/medium/high/xhigh",
             Input::Disconnect => "Type disconnect to restore previous configuration",
@@ -1063,7 +1108,7 @@ impl App {
             Input::Switch(_) => "Switch Codex account?",
         });
         if let Some(title) = title {
-            let popup = account_input_area(area);
+            let popup = self.codex_input_area(area);
             let login = matches!(
                 self.codex_ui.input,
                 Some(
@@ -1101,7 +1146,23 @@ impl App {
                 Some(Input::Delete(_)) => "",
                 _ => "Enter a value, then confirm. Ctrl+U clears the field.",
             };
-            let description = if let Some(Input::Delete(id)) = &self.codex_ui.input {
+            let description = if let Some(Input::Reset(id, credit)) = &self.codex_ui.input {
+                let name = self
+                    .config
+                    .codex
+                    .accounts
+                    .get(id)
+                    .map_or("selected account", |account| account.name.as_str());
+                let expiry = credit
+                    .expires_at
+                    .and_then(|time| chrono::DateTime::from_timestamp(time as i64, 0))
+                    .map(|time| time.format("%Y-%m-%d %H:%M UTC").to_string())
+                    .unwrap_or("No expiry provided".into());
+                format!(
+                    "Consumes one reset card. This cannot be undone.\nAccount: {name}\nCard: {} · {expiry}",
+                    credit.title
+                )
+            } else if let Some(Input::Delete(id)) = &self.codex_ui.input {
                 let name = self
                     .config
                     .codex
@@ -1119,7 +1180,12 @@ impl App {
             let inner = panel_inner(popup);
             if matches!(
                 self.codex_ui.input,
-                Some(Input::Subscription(_) | Input::Switch(_) | Input::Delete(_))
+                Some(
+                    Input::Subscription(_)
+                        | Input::Switch(_)
+                        | Input::Delete(_)
+                        | Input::Reset(_, _)
+                )
             ) {
                 frame.render_widget(
                     Paragraph::new(description).wrap(Wrap { trim: false }),
@@ -1141,7 +1207,12 @@ impl App {
                 Paragraph::new(
                     if matches!(
                         self.codex_ui.input,
-                        Some(Input::Subscription(_) | Input::Switch(_) | Input::Delete(_))
+                        Some(
+                            Input::Subscription(_)
+                                | Input::Switch(_)
+                                | Input::Delete(_)
+                                | Input::Reset(_, _)
+                        )
                     ) {
                         "Enter / y confirm · Esc / n cancel".into()
                     } else if login || matches!(self.codex_ui.input, Some(Input::Rename(_))) {
@@ -1275,6 +1346,7 @@ pub(super) fn account_buttons(area: Rect) -> Vec<(char, &'static str, Rect)> {
         ('x', "Delete [x]"),
         ('r', "Refresh [r]"),
         ('w', "Wake [w]"),
+        ('R', "Reset [R]"),
         ('p', "Apply [p]"),
         ('\u{1b}', "Back [Esc]"),
     ];
@@ -1337,7 +1409,7 @@ mod login_ui_tests {
                 workspace_content_area(area)
             };
             let buttons = account_buttons(content);
-            assert_eq!(buttons.len(), 10);
+            assert_eq!(buttons.len(), 11);
             for (key, label, rect) in &buttons {
                 assert!(rect.right() <= area.right());
                 assert!(rect.bottom() <= area.bottom());
@@ -1510,6 +1582,57 @@ mod login_ui_tests {
         app.open_codex_accounts();
         assert_eq!(app.codex_ui.selected, 1);
         assert_eq!(app.account_to_apply().as_deref(), Some(second));
+    }
+
+    #[test]
+    fn reset_card_requires_confirmation_and_cancel_never_starts_a_job() {
+        let (_temp, mut app) = crate::tui::tests::persisted_app();
+        let id = "reset-fixture";
+        app.config.codex.accounts.insert(
+            id.into(),
+            service::accounts::Account {
+                name: "Personal".into(),
+                ..Default::default()
+            },
+        );
+        app.select_client_tab(ClientTab::Codex);
+        app.codex_ui.accounts = true;
+        let credit = service::accounts::ResetCredit {
+            id: "card-fixture".into(),
+            title: "Full reset".into(),
+            expires_at: None,
+        };
+        app.codex_ui.busy = true;
+        app.codex_ui
+            .sender
+            .send(Update::ResetReady(id.into(), credit))
+            .unwrap();
+        app.codex_ui
+            .sender
+            .send(Update::Done(Ok("Review reset card".into())))
+            .unwrap();
+        app.poll_codex();
+        assert!(matches!(app.codex_ui.input, Some(Input::Reset(_, _))));
+        for (width, height) in [(40, 16), (80, 24)] {
+            let mut terminal =
+                Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+            terminal
+                .draw(|frame| app.draw_codex_accounts(frame, frame.area()))
+                .unwrap();
+            let text: String = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|c| c.symbol())
+                .collect();
+            assert!(text.contains("Use Codex reset card?"));
+            assert!(text.contains("Confirm") && text.contains("Cancel"));
+        }
+        app.handle_codex_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
+            .unwrap();
+        assert!(app.codex_ui.input.is_none());
+        assert!(!app.codex_ui.busy);
     }
 
     #[test]
