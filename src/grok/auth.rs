@@ -1,4 +1,4 @@
-//! Delegate OAuth to Grok Build. Mux never stores or refreshes session tokens.
+//! Delegate OAuth to Grok Build; account snapshots are managed separately.
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
 use std::{
@@ -42,7 +42,7 @@ impl Status {
         )
     }
 }
-fn read_auth(home: &Path) -> Result<Option<Value>> {
+pub(super) fn read_auth(home: &Path) -> Result<Option<Value>> {
     let path = home.join("auth.json");
     if !path.exists() {
         return Ok(None);
@@ -64,7 +64,7 @@ fn read_auth(home: &Path) -> Result<Option<Value>> {
     }
     Ok(Some(auth))
 }
-fn entry_status(entry: &Value) -> Status {
+pub(super) fn entry_status(entry: &Value) -> Status {
     let mode = entry["auth_mode"].as_str().unwrap_or("");
     let nonempty = |key: &str| entry[key].as_str().is_some_and(|s| !s.is_empty());
     if !["oidc", "oauth", "oauth2", "web_login", "web-login"].contains(&mode)
@@ -90,11 +90,12 @@ pub(super) fn saved_entry(home: &Path) -> Result<Option<Value>> {
     let Some(auth) = read_auth(home)? else {
         return Ok(None);
     };
-    let object = auth
-        .as_object()
-        .context("Grok auth.json must be an object")?;
+    Ok(saved_entry_from(&auth))
+}
+pub(super) fn saved_entry_from(auth: &Value) -> Option<Value> {
+    let object = auth.as_object()?;
     let candidates: Vec<&Value> = if object.contains_key("auth_mode") {
-        vec![&auth]
+        vec![auth]
     } else {
         object.values().collect()
     };
@@ -105,7 +106,7 @@ pub(super) fn saved_entry(home: &Path) -> Result<Option<Value>> {
             best = Some(entry);
         }
     }
-    Ok(best.cloned())
+    best.cloned()
 }
 pub fn status(home: &Path) -> Result<Status> {
     Ok(saved_entry(home)?

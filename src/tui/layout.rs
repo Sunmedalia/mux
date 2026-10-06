@@ -966,6 +966,7 @@ pub(super) fn unique_profile_id(base: &str, profiles: &BTreeMap<String, Profile>
 }
 
 /// Full-width account pages place the list beside the selected account details.
+#[cfg(test)]
 pub(super) fn account_page_rows(area: Rect, login_busy: bool) -> [Rect; 4] {
     account_page_rows_with_footer(area, login_busy, 3)
 }
@@ -1020,6 +1021,7 @@ pub(super) fn account_page_rows_with_footer(
     }
 }
 
+#[cfg(test)]
 pub(super) fn embedded_account_rows(area: Rect, login_busy: bool) -> [Rect; 4] {
     embedded_account_rows_with_footer(area, login_busy, 3)
 }

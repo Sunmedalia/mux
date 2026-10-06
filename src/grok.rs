@@ -1,4 +1,5 @@
 //! Grok Build native configuration and conservative field ownership.
+pub mod accounts;
 pub mod auth;
 pub mod usage;
 use crate::config::{self, ApiFormat, AppPaths, Credential, ModelEntry, Profile};
@@ -62,6 +63,8 @@ impl Preferences {
 }
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Settings {
+    #[serde(default)]
+    pub accounts: BTreeMap<String, accounts::Account>,
     #[serde(default)]
     pub profiles: BTreeMap<String, Profile>,
     #[serde(default)]

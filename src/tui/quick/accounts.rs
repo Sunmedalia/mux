@@ -22,6 +22,7 @@ pub(super) struct Card {
     pub badge: String,
     pub rows: Vec<(String, String)>,
     pub gauges: Vec<(String, f64, String)>,
+    pub unknown_gauge: Option<(String, String)>,
     pub models: Vec<String>,
 }
 #[derive(Clone, Debug, Default)]
@@ -229,10 +230,18 @@ fn grok_info(
     }
     lines.push("Direct API traffic is not in the gateway ledger".into());
     let status = grok::auth::status(home).unwrap_or_default();
+    let id = grok::accounts::current_id(home)
+        .ok()
+        .flatten()
+        .or_else(|| grok::usage::account(home).ok().flatten());
+    let saved = id.as_ref().and_then(|id| config.grok.accounts.get(id));
     let mut card = Card {
-        id: grok::usage::account(home).ok().flatten(),
-        name: "Grok".into(),
-        email: status.email.unwrap_or_default(),
+        id: id.clone(),
+        name: saved
+            .filter(|account| Some(&account.name) != account.email.as_ref())
+            .map(|account| safe(&account.name))
+            .unwrap_or("Grok".into()),
+        email: status.email.clone().unwrap_or_default(),
         badge: if status.expired {
             "Expired"
         } else if status.saved {
@@ -243,30 +252,62 @@ fn grok_info(
         .into(),
         ..Default::default()
     };
+    if status.saved {
+        card.rows.push((
+            "Login".into(),
+            if status.expired {
+                "● Local · Expired"
+            } else {
+                "● Local"
+            }
+            .into(),
+        ));
+        card.rows.push((
+            "Accounts".into(),
+            (config.grok.accounts.len() + usize::from(saved.is_none())).to_string(),
+        ));
+        card.rows.push((
+            "Updated".into(),
+            usage
+                .map(|snapshot| {
+                    format!(
+                        "{}m ago",
+                        (chrono::Utc::now().timestamp() - snapshot.fetched_at).max(0) / 60
+                    )
+                })
+                .unwrap_or("—".into()),
+        ));
+    }
     if let Some(snapshot) = usage {
         let c = &snapshot.credits;
-        if let Some(plan) = &c.plan {
+        if !status.expired
+            && let Some(plan) = &c.plan
+        {
             card.badge = safe(plan);
         }
+        let label = match c.period.as_deref().unwrap_or("") {
+            period if period.to_lowercase().contains("week") => "Weekly",
+            period if period.to_lowercase().contains("month") => "Monthly",
+            period if period.to_lowercase().contains("day") => "Daily",
+            _ => "Credits",
+        }
+        .to_owned();
+        let reset = c
+            .reset_at
+            .as_deref()
+            .and_then(|time| chrono::DateTime::parse_from_rfc3339(time).ok())
+            .map(|time| {
+                time.with_timezone(&chrono::Local)
+                    .format("%m/%d %H:%M")
+                    .to_string()
+            })
+            .unwrap_or_default();
         if let Some(percent) = c.percent {
-            card.gauges.push((
-                match c.period.as_deref().unwrap_or("") {
-                    period if period.to_lowercase().contains("week") => "Weekly credits".into(),
-                    period if period.to_lowercase().contains("month") => "Monthly credits".into(),
-                    period if period.to_lowercase().contains("day") => "Daily credits".into(),
-                    _ => "Credits".into(),
-                },
-                percent,
-                c.reset_at
-                    .as_deref()
-                    .and_then(|time| chrono::DateTime::parse_from_rfc3339(time).ok())
-                    .map(|time| {
-                        time.with_timezone(&chrono::Local)
-                            .format("%m/%d %H:%M")
-                            .to_string()
-                    })
-                    .unwrap_or_default(),
-            ));
+            card.gauges.push((label, percent, reset));
+        } else {
+            card.unknown_gauge = Some((label, reset));
+            card.rows
+                .push(("Quota".into(), "○ Usage not published · r refresh".into()));
         }
         if let Some(balance) = c.prepaid_cents {
             card.rows
@@ -277,11 +318,16 @@ fn grok_info(
                 .push(("On demand".into(), format!("${:.2}", used as f64 / 100.0)));
         }
     } else {
-        card.rows.push(("Credits".into(), "— · r refresh".into()));
+        if status.saved {
+            card.unknown_gauge = Some(("Credits".into(), String::new()));
+        }
+        card.rows
+            .push(("Quota".into(), "○ Usage not loaded · r refresh".into()));
     }
     if error.is_some() {
+        card.rows.retain(|(label, _)| label != "Quota");
         card.rows.push((
-            "Refresh".into(),
+            "Quota".into(),
             if usage.is_some() {
                 "! Cached"
             } else {

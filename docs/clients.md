@@ -21,13 +21,15 @@
 
 按 `F4`，选择 **Grok** 打开 **Grok settings**：默认模型、搜索模型、分叉子代理模型、推理强度、权限模式、紧凑显示和思考内容显示。模型字段可手动输入原生模型 ID，`Alt+M` 循环选择已配置模型键；推理强度使用左右键选择，`Alt+E` 切换为自定义输入。空值或 `inherit` 保留原生设置，`Ctrl+S` 保存，`Esc` 取消；未保存变更会提示是否丢弃。
 
-外部修改了 Mux 管理字段时，自动同步暂停。按 `p` 查看冲突字段，确认后重新接入。断开和卸载仅恢复未被外部修改的管理字段；无关配置、MCP、插件、Hooks 和登录凭据保留。不管理 Grok 多账号切换或任意高级 TOML 字段。仅包含继承端点的模型条目会在导入预览中标记并保留，需手动添加完整端点后管理。
+外部修改了 Mux 管理字段时，自动同步暂停。按 `p` 查看冲突字段，确认后重新接入。断开和卸载仅恢复未被外部修改的管理字段；无关配置、MCP、插件、Hooks 和登录凭据保留。不管理任意高级 TOML 字段。仅包含继承端点的模型条目会在导入预览中标记并保留，需手动添加完整端点后管理。
 
-Provider 列表包含独立的 **Grok OAuth Account** 行。全屏选中时，右侧直接显示 OAuth 账号状态；按 `Enter` 或 `o` 可在右侧管理登录、原生模型、Wake 与退出。窄屏则进入独立账号页，按 `Esc` 返回 Provider 列表：`b` 启动浏览器登录，`d` 使用设备码（适合远程终端），页面显示授权链接和设备码；`Esc` 取消正在进行的授权。凭据写入、刷新和退出登录由原生 Grok 处理，登录状态来自本地凭据；账号用量通过官方只读账单接口获取。可用 `MUX_GROK_BIN` 指定 Grok 可执行文件。
+Provider 列表包含独立的 **Grok OAuth Account** 行。全屏选中时，右侧显示账号管理；按 `Enter` 或 `o` 管理，窄屏进入独立账号页。支持保存多个 OAuth 账号：`b` 浏览器登录、`d` 设备码登录，新增登录在隔离目录中完成，不覆盖当前账号；`Esc` 取消授权。打开页面时自动保存现有原生登录，`i` 可再次导入。按 `a` 聚焦账号列表，`↑↓` 或鼠标选择账号，`p` 切换，确认后写入 Grok 原生登录；已运行的 Grok 请重启。`X` 删除所选的本地账号副本，需要确认；当前使用的账号需先切换或退出。`x` 退出原生登录，保留已保存账号，可再次切换恢复。相同账号再次登录更新凭据，不产生重复项。
 
-登录后，填写原生模型（默认 `grok-build`），按 `u` **Use OAuth** 将其设为启动默认模型，然后重启 Grok。Use OAuth 会保存 API Provider 的启用状态、暂停这些 Provider 并移除 Grok 代理路由；再次选中 API Provider 按 `p` 会恢复原来的启用状态和 API 默认模型。登录本身不切换模式；已有厂商、模型和登录凭据都会保留。显式模型 API 配置优先于 OAuth，因此 Use OAuth 要求没有本地覆盖的原生模型及原生模型目录端点。`r` 异步刷新本地登录状态和账号用量，`w` 对当前 OAuth 账号执行 Wake，`x` 确认退出登录；退出只清除原生登录凭据，保留 API 厂商配置。授权方式见 [Grok 官方认证说明](https://github.com/xai-org/grok-build/blob/main/crates/codegen/xai-grok-pager/docs/user-guide/02-authentication.md)。
+账号凭据单独保存在 Mux 状态目录的 `grok-accounts/<id>/auth.json`，Unix 目录权限 0700、文件权限 0600；Mux 配置仅保存账号名称与邮箱。登录与刷新由原生 Grok 处理，用量通过官方只读账单接口获取。`r` / `w` 操作当前使用账号，选中其他账号时需先切换。可用 `MUX_GROK_BIN` 指定 Grok 可执行文件。
 
-进入账号页或登录成功后自动获取用量：显示当前周期的已用比例、剩余比例、额度进度条、重置时间，以及服务返回的预付余额和按需用量/上限。共享额度会标为 **Shared account credit allowance**。这些数据是账号额度，不是本地会话 token 统计；缺失字段不会显示为零。`PgUp/PgDn` 查看较长详情。刷新失败时保留本次运行中同一账号的上次结果并提示缓存状态；退出登录或更换账号会清除对应缓存。访问令牌过期时，先在 Grok 刷新登录或重新授权，再按 `r`。接口依据 [Grok 官方账单实现](https://github.com/xai-org/grok-build/blob/main/crates/codegen/xai-grok-shell/src/extensions/billing.rs)。
+登录后，填写原生模型（默认 `grok-build`），按 `u` **Use OAuth** 将其设为启动默认模型，然后重启 Grok。Use OAuth 保留 API Provider 与代理路由，原生 OAuth 模型成为启动默认值；API 模型仍可通过 `/model` 选择。登录本身不切换模式；已有厂商、模型和登录凭据都会保留。显式模型 API 配置优先于 OAuth，因此 Use OAuth 要求没有本地覆盖的原生模型及原生模型目录端点。`r` 异步刷新本地登录状态和账号用量，`w` 对当前 OAuth 账号执行 Wake，`x` 确认退出登录；退出只清除原生登录凭据，保留 API 厂商配置。授权方式见 [Grok 官方认证说明](https://github.com/xai-org/grok-build/blob/main/crates/codegen/xai-grok-pager/docs/user-guide/02-authentication.md)。
+
+进入账号页或登录成功后自动获取用量：优先显示周期额度进度条、已用和剩余比例，70% / 90% 使用量分别使用警示 / 危险颜色；重置时间按本地时区显示，并附倒计时、最后刷新时间，以及服务返回的预付余额和按需用量/上限。共享额度会标为 **Shared account credit allowance**。这些数据是账号额度，不是本地会话 token 统计。CLI 账单接口未返回百分比时，会尝试官方网页的只读额度 RPC；只有完整成功响应和有效周期才能确认省略的零用量。两处都无法提供比例时，账号页和 Pulse 保留带 `— used` 的纹理额度条及重置时间，明确显示用量未知；预付 Balance 是独立余额，不代表订阅剩余额度。`PgUp/PgDn` 查看较长详情。刷新失败时保留本次运行中同一账号的上次结果并提示缓存状态；退出登录或更换账号会清除对应缓存。访问令牌过期时，先在 Grok 刷新登录或重新授权，再按 `r`。接口依据 [Grok 官方账单实现](https://github.com/xai-org/grok-build/blob/main/crates/codegen/xai-grok-shell/src/extensions/billing.rs)。
 
 实现依据 [Grok 原生设置说明](https://docs.x.ai/build/settings)，兼容验证基准为 Grok Build CLI `1.0.41`。
 

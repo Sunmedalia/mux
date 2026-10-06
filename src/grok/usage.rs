@@ -1,5 +1,6 @@
 //! Grok account credits and explicit minimal wake requests, following official CLI contracts:
 //! https://github.com/xai-org/grok-build/blob/main/crates/codegen/xai-grok-shell/src/extensions/billing.rs
+mod web;
 use super::auth;
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
@@ -10,6 +11,7 @@ const ENDPOINT: &str = "https://cli-chat-proxy.grok.com/v1/billing?format=credit
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Credits {
     pub percent: Option<f64>,
+    pub percent_error: Option<Box<str>>,
     pub period: Option<String>,
     pub reset_at: Option<String>,
     pub used_cents: Option<i64>,
@@ -95,6 +97,7 @@ pub fn parse(value: &Value) -> Result<Credits> {
         _ => None,
     };
     let credits = Credits {
+        percent_error: None,
         unified: config["isUnifiedBillingUser"].as_bool(),
         percent,
         period,
@@ -190,7 +193,28 @@ fn validated_entry(home: &Path) -> Result<Value> {
 pub fn fetch(home: &Path) -> Result<Snapshot> {
     let entry = validated_entry(home)?;
     let account = account_id(&entry);
-    let credits = fetch_at(ENDPOINT, &entry)?;
+    let mut credits = fetch_at(ENDPOINT, &entry)?;
+    if credits.percent.is_none() {
+        match web::fetch(&entry) {
+            Ok((percent, reset)) => {
+                let same_period = credits
+                    .reset_at
+                    .as_deref()
+                    .and_then(|time| chrono::DateTime::parse_from_rfc3339(time).ok())
+                    .zip(reset)
+                    .is_none_or(|(proxy, web)| proxy.timestamp() == web.timestamp());
+                if same_period {
+                    credits.percent = Some(percent);
+                    if credits.reset_at.is_none() {
+                        credits.reset_at = reset.map(|time| time.to_rfc3339());
+                    }
+                } else {
+                    credits.percent_error = Some("Billing periods disagree · r refresh".into());
+                }
+            }
+            Err(error) => credits.percent_error = Some(error.to_string().into()),
+        }
+    }
     Ok(Snapshot {
         account,
         credits,
@@ -534,6 +558,10 @@ mod fetch_tests {
         let home = crate::grok::home().unwrap();
         let before = std::fs::read(home.join("auth.json")).unwrap();
         let snapshot = fetch(&home).unwrap();
+        eprintln!(
+            "Grok usage percent: {:?}; fallback: {:?}",
+            snapshot.credits.percent, snapshot.credits.percent_error
+        );
         assert!(snapshot.credits.percent.is_some() || snapshot.credits.prepaid_cents.is_some());
         assert_eq!(std::fs::read(home.join("auth.json")).unwrap(), before);
     }

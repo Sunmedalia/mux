@@ -2,6 +2,7 @@ use super::*;
 
 #[derive(Default)]
 pub(super) struct Monitor {
+    pub(super) picker: Option<picker::Picker>,
     pub(super) accounts: accounts::Accounts,
     pub(super) pulse_theme: theme::PulseTheme,
     pub(super) snapshot: Snapshot,

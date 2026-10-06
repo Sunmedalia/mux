@@ -395,13 +395,22 @@ impl App {
                 self.open_grok_auth();
             }
             let content = panel_inner(panel);
-            let rows = embedded_account_rows(content, self.grok_auth.busy);
+            let rows = grok_auth::account_rows(content, self.grok_auth.busy, true);
+            if !self
+                .grok_auth
+                .page
+                .as_ref()
+                .is_some_and(|p| p.confirm_logout || p.confirm_account.is_some())
+                && self.grok_account_list_mouse(rows[1], mouse)
+            {
+                return Ok(MouseAction::None);
+            }
             if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
                 if self
                     .grok_auth
                     .page
                     .as_ref()
-                    .is_some_and(|page| page.confirm_logout)
+                    .is_some_and(|page| page.confirm_logout || page.confirm_account.is_some())
                 {
                     if let Some(index) =
                         modal_button_rects(grok_auth::confirmation_area(content), 2)

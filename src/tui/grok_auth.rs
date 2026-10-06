@@ -12,9 +12,12 @@ use std::sync::{
 enum Update {
     Progress(String),
     Done(Result<auth::Status, String>),
+    Saved(String),
     Usage(u64, Result<usage::Snapshot, String>),
 }
 pub(super) struct AuthUi {
+    accounts: BTreeMap<String, crate::grok::accounts::Account>,
+    account_index: usize,
     pub busy: bool,
     pub home_selected: bool,
     pub page: Option<AccountPage>,
@@ -29,11 +32,14 @@ pub(super) struct AuthUi {
     usage_refreshing: bool,
     usage_request: u64,
     usage_waking: bool,
+    account_added: bool,
 }
 impl Default for AuthUi {
     fn default() -> Self {
         let (sender, receiver) = mpsc::channel();
         Self {
+            accounts: BTreeMap::new(),
+            account_index: 0,
             busy: false,
             home_selected: false,
             page: None,
@@ -48,6 +54,7 @@ impl Default for AuthUi {
             usage_refreshing: false,
             usage_request: 0,
             usage_waking: false,
+            account_added: false,
         }
     }
 }
@@ -61,9 +68,10 @@ pub(super) struct AccountPage {
     pub selected: usize,
     pub model: FormField,
     pub confirm_logout: bool,
+    pub(super) confirm_account: Option<(String, bool)>,
     pub scroll: u16,
 }
-const ACTIONS: [&str; 7] = [
+const ACTIONS: [&str; 10] = [
     "Browser (b)",
     "Device code (d)",
     "Use OAuth (u)",
@@ -71,6 +79,9 @@ const ACTIONS: [&str; 7] = [
     "Wake (w)",
     "Sign out (x)",
     "Back (Esc)",
+    "Switch (p)",
+    "Import (i)",
+    "Delete (X)",
 ];
 pub(super) fn account_actions(screen: Rect) -> Vec<Rect> {
     let natural: u16 = ACTIONS
@@ -81,8 +92,8 @@ pub(super) fn account_actions(screen: Rect) -> Vec<Rect> {
     let padding = if roomy { 2 } else { 0 };
     let gap = if roomy { 2 } else { 1 };
     let mut x = screen.x;
-    let mut y = screen.bottom().saturating_sub(3);
-    ACTIONS
+    let mut y = 0;
+    let mut actions: Vec<Rect> = ACTIONS
         .iter()
         .map(|label| {
             let width = UnicodeWidthStr::width(*label) as u16 + padding;
@@ -94,7 +105,24 @@ pub(super) fn account_actions(screen: Rect) -> Vec<Rect> {
             x += width + gap;
             rect
         })
-        .collect()
+        .collect();
+    let height = actions.last().map_or(0, |rect| rect.bottom());
+    let offset = screen.bottom().saturating_sub(height);
+    for rect in &mut actions {
+        rect.y += offset;
+    }
+    actions
+}
+pub(super) fn account_rows(area: Rect, busy: bool, embedded: bool) -> [Rect; 4] {
+    let actions = account_actions(Rect::new(0, 0, area.width, 100));
+    let height = actions
+        .last()
+        .map_or(1, |last| last.bottom() - actions[0].y);
+    if embedded {
+        embedded_account_rows_with_footer(area, busy, height)
+    } else {
+        account_page_rows_with_footer(area, busy, height)
+    }
 }
 pub(super) fn confirmation_area(screen: Rect) -> Rect {
     centered_rect(
@@ -165,6 +193,23 @@ impl App {
         }
         lines.push(Line::raw(""));
         lines
+    }
+    fn refresh_grok_accounts(&mut self) {
+        if let Ok(config) = config::load(&self.paths.config) {
+            self.grok_auth.accounts = config.grok.accounts;
+            self.config.grok.accounts = self.grok_auth.accounts.clone();
+            self.grok_auth.account_index = self
+                .grok_auth
+                .account_index
+                .min(self.grok_auth.accounts.len().saturating_sub(1));
+        }
+    }
+    fn selected_grok_account(&self) -> Option<String> {
+        self.grok_auth
+            .accounts
+            .keys()
+            .nth(self.grok_auth.account_index)
+            .cloned()
     }
     pub(super) fn load_grok_auth_status(&mut self) {
         self.grok_auth.status = auth::status(&self.grok_home).unwrap_or_default();
@@ -247,6 +292,13 @@ impl App {
     #[cfg(test)]
     fn spawn_grok_usage(&self) {}
     pub(super) fn open_grok_auth(&mut self) {
+        let import_error = crate::grok::accounts::capture(&self.paths, &self.grok_home).err();
+        self.refresh_grok_accounts();
+        if let Ok(Some(id)) = crate::grok::accounts::current_id(&self.grok_home)
+            && let Some(index) = self.grok_auth.accounts.keys().position(|key| key == &id)
+        {
+            self.grok_auth.account_index = index;
+        }
         self.refresh_grok_auth();
         let default = self
             .config
@@ -260,6 +312,7 @@ impl App {
             selected: 1,
             model: field("Native model", default),
             confirm_logout: false,
+            confirm_account: None,
             scroll: 0,
         });
         if provider_workspace(self.screen) {
@@ -268,13 +321,16 @@ impl App {
             self.focus = Focus::Details;
         }
         self.refresh_grok_usage();
+        if let Some(error) = import_error {
+            self.grok_auth.message = format!("Could not import current login: {error}");
+        }
     }
     fn refresh_grok_auth(&mut self) {
         match auth::status(&self.grok_home) {
             Ok(status) => {
                 self.grok_auth.status = status;
                 self.grok_auth.message =
-                    "Use OAuth pauses API providers; selecting an API provider restores them."
+                    "Add accounts with Browser or Device code; Switch (p) selects the active login."
                         .into();
             }
             Err(error) => {
@@ -287,6 +343,11 @@ impl App {
         if self.grok_auth.busy {
             return;
         }
+        if self.grok_auth.usage_waking {
+            self.grok_auth.message = "Wait for Wake to finish before changing login".into();
+            return;
+        }
+        self.grok_auth.account_added = false;
         self.grok_auth.usage_request = self.grok_auth.usage_request.wrapping_add(1);
         self.grok_auth.usage_refreshing = false;
         self.grok_auth.usage_waking = false;
@@ -304,11 +365,22 @@ impl App {
         let cancel = self.grok_auth.cancel.clone();
         let sender = self.grok_auth.sender.clone();
         let home = self.grok_home.clone();
+        let paths = self.paths.clone();
         std::thread::spawn(move || {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                auth::run(action, &home, &cancel, |text| {
-                    let _ = sender.send(Update::Progress(text));
-                })
+                if action == Action::Logout {
+                    crate::grok::accounts::capture(&paths, &home)?;
+                    auth::run(action, &home, &cancel, |text| {
+                        let _ = sender.send(Update::Progress(text));
+                    })
+                } else {
+                    let id =
+                        crate::grok::accounts::login(&paths, &home, action, &cancel, |text| {
+                            let _ = sender.send(Update::Progress(text));
+                        })?;
+                    let _ = sender.send(Update::Saved(id));
+                    auth::status(&home)
+                }
             }))
             .unwrap_or_else(|_| Err(anyhow::anyhow!("Grok authorization worker stopped")))
             .map_err(|e| format!("{e:#}"));
@@ -364,14 +436,26 @@ impl App {
                         }
                     }
                 }
+                Update::Saved(id) => {
+                    self.grok_auth.account_added = true;
+                    self.refresh_grok_accounts();
+                    if let Some(index) = self.grok_auth.accounts.keys().position(|key| key == &id) {
+                        self.grok_auth.account_index = index;
+                    }
+                    self.grok_auth.message =
+                        "Account added · select it and Switch (p) to use it".into();
+                }
                 Update::Done(result) => {
+                    self.refresh_grok_accounts();
                     let succeeded = result.is_ok();
                     self.grok_auth.busy = false;
                     self.grok_auth.progress.clear();
                     match result {
                         Ok(status) => {
-                            self.grok_auth.message = if status.saved {
-                                "OAuth login saved by Grok · Use OAuth selects the native startup model"
+                            self.grok_auth.message = if self.grok_auth.account_added {
+                                "Account saved · Switch (p) to use it · current login retained"
+                            } else if status.saved {
+                                "Accounts saved · Switch (p) selects login · Use OAuth selects startup model"
                             } else if self.config.grok.active_mode == Some(crate::grok::Mode::Account) {
                                 "Grok signed out · API providers remain available"
                             } else {
@@ -417,6 +501,35 @@ impl App {
             }
             return Ok(false);
         }
+        if let Some((id, delete)) = dialog.confirm_account.clone() {
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('n') => dialog.confirm_account = None,
+                KeyCode::Enter | KeyCode::Char('y') => {
+                    if self.grok_auth.usage_refreshing {
+                        self.grok_auth.message =
+                            "Wait for usage refresh or Wake to finish before changing accounts"
+                                .into();
+                        return Ok(false);
+                    }
+                    if delete {
+                        crate::grok::accounts::remove(&self.paths, &self.grok_home, &id)?;
+                    } else {
+                        crate::grok::accounts::activate(&self.paths, &self.grok_home, &id)?;
+                    }
+                    dialog.confirm_account = None;
+                    self.refresh_grok_accounts();
+                    self.load_grok_auth_status();
+                    self.grok_auth.message = if delete {
+                        "Saved account deleted"
+                    } else {
+                        "Grok account switched · restart Grok for new sessions"
+                    }
+                    .into();
+                }
+                _ => {}
+            }
+            return Ok(false);
+        }
         if dialog.confirm_logout {
             match key.code {
                 KeyCode::Enter | KeyCode::Char('y') => {
@@ -426,6 +539,30 @@ impl App {
                 KeyCode::Esc | KeyCode::Char('n') => dialog.confirm_logout = false,
                 _ => {}
             }
+            return Ok(false);
+        }
+        if dialog.selected == ACTIONS.len() + 1 {
+            match key.code {
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.grok_auth.account_index = (self.grok_auth.account_index + 1)
+                        .min(self.grok_auth.accounts.len().saturating_sub(1));
+                    return Ok(false);
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.grok_auth.account_index = self.grok_auth.account_index.saturating_sub(1);
+                    return Ok(false);
+                }
+                KeyCode::Enter => {
+                    if let Some(id) = self.selected_grok_account() {
+                        dialog.confirm_account = Some((id, false));
+                    }
+                    return Ok(false);
+                }
+                _ => {}
+            }
+        }
+        if key.code == KeyCode::Char('a') && dialog.selected != 0 {
+            dialog.selected = ACTIONS.len() + 1;
             return Ok(false);
         }
         if dialog.selected != 0 && key.modifiers.is_empty() {
@@ -440,11 +577,11 @@ impl App {
         match key.code {
             KeyCode::Esc => return Ok(true),
             KeyCode::Tab | KeyCode::Down => {
-                dialog.selected = (dialog.selected + 1) % 8;
+                dialog.selected = (dialog.selected + 1) % (ACTIONS.len() + 2);
                 return Ok(false);
             }
             KeyCode::BackTab | KeyCode::Up => {
-                dialog.selected = (dialog.selected + 7) % 8;
+                dialog.selected = (dialog.selected + ACTIONS.len() + 1) % (ACTIONS.len() + 2);
                 return Ok(false);
             }
             KeyCode::PageDown => {
@@ -473,6 +610,9 @@ impl App {
             KeyCode::Char('w') => 5,
             KeyCode::Char('x') => 6,
             KeyCode::Char('q') => 7,
+            KeyCode::Char('p') => 8,
+            KeyCode::Char('i') => 9,
+            KeyCode::Char('X') => 10,
             KeyCode::Enter => dialog.selected,
             _ => return Ok(false),
         };
@@ -481,13 +621,48 @@ impl App {
             1 => self.start_grok_auth(Action::Browser),
             2 => self.start_grok_auth(Action::Device),
             3 => {
+                if self.selected_grok_account().is_some()
+                    && self.selected_grok_account()
+                        != crate::grok::accounts::current_id(&self.grok_home)?
+                {
+                    self.grok_auth.message =
+                        "Switch the selected account with p before using OAuth".into();
+                    return Ok(false);
+                }
                 let model = dialog.model.value.trim().to_owned();
                 self.select_grok_oauth(model, false)?;
             }
-            4 => self.refresh_grok_usage(),
-            5 => self.wake_grok_usage()?,
+            4 | 5 => {
+                if self.selected_grok_account().is_some()
+                    && self.selected_grok_account()
+                        != crate::grok::accounts::current_id(&self.grok_home)?
+                {
+                    self.grok_auth.message =
+                        "Switch the selected saved account with p before refreshing or waking it"
+                            .into();
+                } else if selected == 4 {
+                    self.refresh_grok_usage();
+                } else {
+                    self.wake_grok_usage()?;
+                }
+            }
             6 => dialog.confirm_logout = true,
             7 => return Ok(true),
+            8 => {
+                if let Some(id) = self.selected_grok_account() {
+                    dialog.confirm_account = Some((id, false));
+                }
+            }
+            9 => {
+                crate::grok::accounts::capture(&self.paths, &self.grok_home)?;
+                self.refresh_grok_accounts();
+                self.grok_auth.message = "Current native login saved".into();
+            }
+            10 => {
+                if let Some(id) = self.selected_grok_account() {
+                    dialog.confirm_account = Some((id, true));
+                }
+            }
             _ => {}
         }
         Ok(false)
@@ -554,7 +729,47 @@ impl App {
         }
         result.map(|_| ())
     }
+    pub(super) fn grok_account_list_mouse(&mut self, area: Rect, mouse: MouseEvent) -> bool {
+        if !contains(area, mouse.column, mouse.row) || self.grok_auth.busy {
+            return false;
+        }
+        match mouse.kind {
+            MouseEventKind::ScrollDown => {
+                self.grok_auth.account_index = (self.grok_auth.account_index + 1)
+                    .min(self.grok_auth.accounts.len().saturating_sub(1))
+            }
+            MouseEventKind::ScrollUp => {
+                self.grok_auth.account_index = self.grok_auth.account_index.saturating_sub(1)
+            }
+            MouseEventKind::Down(MouseButton::Left)
+                if mouse.row > area.y && mouse.row < area.bottom().saturating_sub(1) =>
+            {
+                let visible = area.height.saturating_sub(2) as usize;
+                let offset = self
+                    .grok_auth
+                    .account_index
+                    .saturating_sub(visible.saturating_sub(1));
+                self.grok_auth.account_index = (offset + (mouse.row - area.y - 1) as usize)
+                    .min(self.grok_auth.accounts.len().saturating_sub(1));
+            }
+            _ => return false,
+        }
+        if let Some(page) = &mut self.grok_auth.page {
+            page.selected = ACTIONS.len() + 1;
+        }
+        true
+    }
     pub(super) fn grok_auth_page_mouse(&mut self, mouse: MouseEvent, screen: Rect) -> Result<()> {
+        let rows = account_rows(workspace_content_area(screen), self.grok_auth.busy, false);
+        if !self
+            .grok_auth
+            .page
+            .as_ref()
+            .is_some_and(|p| p.confirm_logout || p.confirm_account.is_some())
+            && self.grok_account_list_mouse(rows[1], mouse)
+        {
+            return Ok(());
+        }
         if matches!(
             mouse.kind,
             MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
@@ -571,16 +786,17 @@ impl App {
         if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
             return Ok(());
         }
-        let area = account_page_rows(workspace_content_area(screen), self.grok_auth.busy)[2];
+        let area = account_rows(workspace_content_area(screen), self.grok_auth.busy, false)[2];
         let confirm = self
             .grok_auth
             .page
             .as_ref()
-            .is_some_and(|a| a.confirm_logout);
+            .is_some_and(|a| a.confirm_logout || a.confirm_account.is_some());
         if confirm {
-            if let Some(i) = modal_button_rects(confirmation_area(screen), 2)
-                .iter()
-                .position(|r| contains(*r, mouse.column, mouse.row))
+            if let Some(i) =
+                modal_button_rects(confirmation_area(workspace_content_area(screen)), 2)
+                    .iter()
+                    .position(|r| contains(*r, mouse.column, mouse.row))
             {
                 self.grok_auth_page_key(KeyEvent::new(
                     KeyCode::Char(if i == 0 { 'y' } else { 'n' }),
@@ -631,11 +847,7 @@ impl App {
         content: Rect,
         embedded: bool,
     ) {
-        let rows = if embedded {
-            embedded_account_rows(content, self.grok_auth.busy)
-        } else {
-            account_page_rows(content, self.grok_auth.busy)
-        };
+        let rows = account_rows(content, self.grok_auth.busy, embedded);
         frame.render_widget(
             Paragraph::new(Line::from(vec![Span::styled(
                 if embedded {
@@ -661,37 +873,41 @@ impl App {
                 rows[0].height.saturating_sub(1 + u16::from(!embedded)),
             ),
         );
-        let items = if self.grok_auth.status.saved {
-            vec![ListItem::new(Line::from(vec![
-                Span::styled("● ", Style::default().fg(ROUTE)),
-                Span::styled(
-                    "Grok account",
-                    Style::default().add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    format!(
-                        "  {}",
-                        self.grok_auth
-                            .status
-                            .email
-                            .as_deref()
-                            .unwrap_or("Saved native login")
-                    ),
-                    Style::default().fg(MUTED),
-                ),
-                Span::styled("  Local login", Style::default().fg(CONNECTED)),
-            ]))]
+        let current = crate::grok::accounts::current_id(&self.grok_home)
+            .ok()
+            .flatten();
+        let items: Vec<ListItem> = if self.grok_auth.accounts.is_empty() {
+            vec![ListItem::new(
+                "No saved account · Browser / Device code to add",
+            )]
         } else {
-            vec![ListItem::new(Line::styled(
-                "No saved account · Browser / Device code to sign in",
-                Style::default().fg(MUTED),
-            ))]
+            self.grok_auth
+                .accounts
+                .iter()
+                .map(|(id, account)| {
+                    ListItem::new(format!(
+                        "{} {} · {}",
+                        if current.as_ref() == Some(id) {
+                            "●"
+                        } else {
+                            "○"
+                        },
+                        account.name,
+                        if current.as_ref() == Some(id) {
+                            "Local login"
+                        } else {
+                            "Saved"
+                        }
+                    ))
+                })
+                .collect()
         };
-        let mut state =
-            ListState::default().with_selected(self.grok_auth.status.saved.then_some(0));
+        let mut state = ListState::default().with_selected(
+            (!self.grok_auth.accounts.is_empty()).then_some(self.grok_auth.account_index),
+        );
         frame.render_stateful_widget(
             List::new(items)
-                .block(panel(" Grok accounts ", true))
+                .block(panel(" Grok accounts · a focus · ↑↓ select ", true))
                 .highlight_style(Style::default().bg(theme::PROVIDER_SELECTION))
                 .highlight_symbol(self.theme.selection_symbol()),
             rows[1],
@@ -709,6 +925,7 @@ impl App {
                     .unwrap_or("grok-build"),
             ),
             confirm_logout: false,
+            confirm_account: None,
             scroll: 0,
         };
         let page = self.grok_auth.page.as_ref().unwrap_or(&fallback);
@@ -717,7 +934,7 @@ impl App {
                 if self.grok_auth.busy {
                     " Login progress · Esc cancel "
                 } else {
-                    " Account configuration · PgUp/PgDn "
+                    " Account configuration · active usage "
                 },
                 false,
             ),
@@ -763,16 +980,11 @@ impl App {
                 ));
             }
             if let Some(snapshot) = &self.grok_auth.usage {
+                let mut credits = credit_display_lines(snapshot, inner.width, chrono::Utc::now());
                 if inner.height <= 2 {
-                    lines.extend(
-                        snapshot
-                            .summary()
-                            .lines()
-                            .map(|line| Line::raw(line.to_owned())),
-                    );
-                } else {
-                    lines.extend(codex::usage_display_lines(&snapshot.summary(), inner.width));
+                    credits.swap(0, 1);
                 }
+                lines.extend(credits);
                 lines.push(Line::raw(""));
                 lines.push(Line::raw(self.grok_auth.message.clone()));
             } else {
@@ -795,7 +1007,7 @@ impl App {
             ),
         );
         for (i, rect) in account_actions(content).into_iter().enumerate() {
-            if embedded && i == 6 {
+            if embedded && i == 6 && !self.grok_auth.busy {
                 continue;
             }
             frame.render_widget(
@@ -810,10 +1022,33 @@ impl App {
                     (self.grok_auth.busy && i != 6)
                         || (matches!(i, 3 | 4)
                             && (self.grok_auth.usage_refreshing || !self.grok_auth.status.saved)),
-                    i == 5,
+                    i == 5 || i == 9,
                 )),
                 rect,
             );
+        }
+        if let Some((id, delete)) = &page.confirm_account {
+            let area = confirmation_area(content);
+            frame.render_widget(Clear, area);
+            frame.render_widget(
+                panel(
+                    if *delete {
+                        " Delete saved Grok account? "
+                    } else {
+                        " Switch Grok account? "
+                    },
+                    true,
+                ),
+                area,
+            );
+            let name = self
+                .grok_auth
+                .accounts
+                .get(id)
+                .map_or("selected account", |account| account.name.as_str());
+            let inner = panel_inner(area);
+            frame.render_widget(Paragraph::new(format!("Account: {name}\n{}", if *delete {"Deletes its saved credentials. Switch or sign out before deleting the active login."} else {"Makes this login active in Grok. Restart Grok for new sessions."})).wrap(Wrap{trim:false}),Rect::new(inner.x,inner.y,inner.width,inner.height.saturating_sub(1)));
+            draw_modal_buttons(frame, area, &["Confirm", "Cancel"]);
         }
         if page.confirm_logout {
             let area = confirmation_area(content);
@@ -826,10 +1061,265 @@ impl App {
     }
 }
 
+/// Render the billing fields directly so the gauge does not depend on summary wording.
+fn credit_display_lines(
+    snapshot: &usage::Snapshot,
+    width: u16,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Vec<Line<'static>> {
+    let credits = &snapshot.credits;
+    let mut lines = Vec::new();
+    let muted = Style::default().fg(MUTED);
+    let dollars = |cents: i64| format!("${:.2}", cents as f64 / 100.0);
+    lines.push(Line::styled(
+        format!(
+            "{} credits",
+            credits.period.as_deref().unwrap_or("Included")
+        ),
+        Style::default().fg(ROUTE).add_modifier(Modifier::BOLD),
+    ));
+    if let Some(percent) = credits
+        .percent
+        .filter(|percent| percent.is_finite() && *percent >= 0.0)
+    {
+        let color = if percent >= 90.0 {
+            ERROR
+        } else if percent >= 70.0 {
+            WARNING
+        } else {
+            ROUTE
+        };
+        let label = format!(" {percent:.1}% used");
+        let cells = usize::from(width)
+            .saturating_sub(UnicodeWidthStr::width(label.as_str()))
+            .min(36);
+        let filled = (percent.clamp(0.0, 100.0) / 100.0 * cells as f64).round() as usize;
+        lines.push(Line::from(vec![
+            Span::styled("━".repeat(filled), Style::default().fg(color)),
+            Span::styled("─".repeat(cells - filled), muted),
+            Span::styled(label, Style::default().fg(color)),
+        ]));
+        lines.push(Line::styled(
+            format!("Remaining allowance: {:.1}%", (100.0 - percent).max(0.0)),
+            Style::default().fg(if percent >= 90.0 { WARNING } else { ENABLED }),
+        ));
+    } else {
+        let label = " — used";
+        let cells = usize::from(width)
+            .saturating_sub(UnicodeWidthStr::width(label))
+            .min(36);
+        lines.push(Line::styled(format!("{}{label}", "▒".repeat(cells)), muted));
+        lines.push(Line::styled("xAI did not publish usage · r refresh", muted));
+    }
+    if let Some(reset) = credits
+        .reset_at
+        .as_deref()
+        .and_then(|time| chrono::DateTime::parse_from_rfc3339(time).ok())
+    {
+        lines.push(Line::styled(
+            format!(
+                "Resets {}",
+                reset.with_timezone(&chrono::Local).format("%m/%d %H:%M %Z")
+            ),
+            muted,
+        ));
+        let minutes = (reset.with_timezone(&chrono::Utc) - now).num_minutes();
+        let countdown = if reset <= now {
+            "Reset time reached · r refresh".into()
+        } else if minutes < 1 {
+            "Reset in less than 1m".into()
+        } else if minutes >= 1440 {
+            format!("Reset in {}d {}h", minutes / 1440, minutes % 1440 / 60)
+        } else {
+            format!("Reset in {}h {}m", minutes / 60, minutes % 60)
+        };
+        lines.push(Line::styled(countdown, muted));
+    } else {
+        lines.push(Line::styled("Reset time unavailable", muted));
+    }
+    if let Some(error) = &credits.percent_error {
+        lines.push(Line::styled(format!("Usage source: {error}"), muted));
+    }
+    if let Some(plan) = &credits.plan {
+        lines.push(Line::raw(format!("Plan: {plan}")));
+    }
+    if credits.unified == Some(true) {
+        lines.push(Line::styled("Shared account credit allowance", muted));
+    }
+    if let Some(used) = credits.used_cents {
+        lines.push(Line::raw(format!(
+            "Included used: {}{}",
+            dollars(used),
+            credits
+                .limit_cents
+                .map(|limit| format!(" / {}", dollars(limit)))
+                .unwrap_or_default()
+        )));
+    } else if let Some(limit) = credits.limit_cents {
+        lines.push(Line::raw(format!("Included limit: {}", dollars(limit))));
+    }
+    if let Some(balance) = credits.prepaid_cents {
+        lines.push(Line::raw(format!("Prepaid balance: {}", dollars(balance))));
+    }
+    if let Some(used) = credits.on_demand_used_cents {
+        lines.push(Line::raw(format!(
+            "On-demand used: {}{}",
+            dollars(used),
+            credits
+                .on_demand_cap_cents
+                .map(|cap| format!(" / {}", dollars(cap)))
+                .unwrap_or_default()
+        )));
+    } else if let Some(cap) = credits.on_demand_cap_cents {
+        lines.push(Line::raw(format!("On-demand cap: {}", dollars(cap))));
+    }
+    if let Some(fetched) = chrono::DateTime::from_timestamp(snapshot.fetched_at, 0) {
+        lines.push(Line::styled(
+            format!(
+                "Last refresh: {}",
+                fetched
+                    .with_timezone(&chrono::Local)
+                    .format("%m/%d %H:%M:%S")
+            ),
+            muted,
+        ));
+    }
+    lines
+}
+
 #[cfg(test)]
 mod usage_tests {
     use super::*;
     use ratatui::{Terminal, backend::TestBackend};
+    #[test]
+    fn credit_gauges_handle_exceeded_and_missing_allowances() {
+        let now = chrono::DateTime::parse_from_rfc3339("2026-10-05T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let mut snapshot = usage::Snapshot {
+            account: "fixture".into(),
+            fetched_at: now.timestamp(),
+            credits: usage::Credits {
+                percent: Some(125.0),
+                period: Some("Weekly".into()),
+                reset_at: Some("2026-10-07T03:00:00Z".into()),
+                prepaid_cents: Some(1234),
+                ..Default::default()
+            },
+        };
+        let text = |lines: &[Line<'_>]| {
+            lines
+                .iter()
+                .map(|line| line.to_string())
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        for width in [16, 30, 80] {
+            let lines = credit_display_lines(&snapshot, width, now);
+            assert!(lines[1].width() <= width as usize);
+            assert!(!lines[1].to_string().contains('─'));
+            let shown = text(&lines);
+            assert!(shown.contains("125.0% used") && shown.contains("Remaining allowance: 0.0%"));
+            assert!(shown.contains("Reset in 2d 3h") && shown.contains("Prepaid balance: $12.34"));
+        }
+        snapshot.credits.percent = None;
+        snapshot.credits.reset_at = None;
+        let lines = credit_display_lines(&snapshot, 40, now);
+        let shown = text(&lines);
+        assert!(
+            shown.contains("xAI did not publish usage") && shown.contains("Reset time unavailable")
+        );
+        assert!(!shown.contains("0.0%") && !shown.contains('━'));
+        snapshot.credits.percent = Some(0.0);
+        snapshot.credits.reset_at = Some("2026-10-04T00:00:00Z".into());
+        let shown = text(&credit_display_lines(&snapshot, 40, now));
+        assert!(
+            shown.contains("Remaining allowance: 100.0%")
+                && shown.contains("Reset time reached · r refresh")
+        );
+    }
+    #[test]
+    fn saved_accounts_switch_and_delete_require_confirmation() {
+        let (temp, mut app) = super::super::tests::persisted_app();
+        app.grok_home = temp.path().join("grok");
+        std::fs::create_dir_all(&app.grok_home).unwrap();
+        let write = |user: &str| {
+            std::fs::write(app.grok_home.join("auth.json"), serde_json::json!({"auth_mode":"oidc","user_id":user,"email":format!("{user}@example.com"),"key":format!("SECRET_{user}")}).to_string()).unwrap();
+        };
+        write("one");
+        let first = crate::grok::accounts::capture(&app.paths, &app.grok_home)
+            .unwrap()
+            .unwrap();
+        write("two");
+        let second = crate::grok::accounts::capture(&app.paths, &app.grok_home)
+            .unwrap()
+            .unwrap();
+        app.select_client_tab(ClientTab::Grok);
+        app.open_grok_auth();
+        app.grok_auth.usage_refreshing = false;
+        app.grok_auth.account_index = app
+            .grok_auth
+            .accounts
+            .keys()
+            .position(|id| id == &first)
+            .unwrap();
+        let press = |app: &mut App, code| {
+            app.grok_auth_page_key(KeyEvent::new(code, KeyModifiers::NONE))
+                .unwrap()
+        };
+        press(&mut app, KeyCode::Char('p'));
+        assert_eq!(
+            crate::grok::accounts::current_id(&app.grok_home).unwrap(),
+            Some(second.clone())
+        );
+        assert!(
+            app.grok_auth
+                .page
+                .as_ref()
+                .unwrap()
+                .confirm_account
+                .is_some()
+        );
+        press(&mut app, KeyCode::Esc);
+        assert_eq!(
+            crate::grok::accounts::current_id(&app.grok_home).unwrap(),
+            Some(second.clone())
+        );
+        press(&mut app, KeyCode::Char('p'));
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(
+            crate::grok::accounts::current_id(&app.grok_home).unwrap(),
+            Some(first)
+        );
+        app.grok_auth.account_index = app
+            .grok_auth
+            .accounts
+            .keys()
+            .position(|id| id == &second)
+            .unwrap();
+        for (width, height) in [(40, 12), (80, 24), (160, 40)] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal.draw(|frame| app.draw(frame)).unwrap();
+            let text: String = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect();
+            assert!(!text.contains("SECRET_"));
+            if width >= 80 {
+                assert!(text.contains("one@example.com") && text.contains("two@example.com"));
+            }
+        }
+        press(&mut app, KeyCode::Char('X'));
+        assert_eq!(app.grok_auth.accounts.len(), 2);
+        press(&mut app, KeyCode::Char('n'));
+        assert_eq!(app.grok_auth.accounts.len(), 2);
+        press(&mut app, KeyCode::Char('X'));
+        press(&mut app, KeyCode::Char('y'));
+        assert_eq!(app.grok_auth.accounts.len(), 1);
+    }
     #[test]
     fn usage_refresh_keeps_account_list_cache_and_ignores_stale_account_results() {
         let (temp, mut app) = super::super::tests::persisted_app();
@@ -881,7 +1371,7 @@ mod usage_tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect();
-        assert!(waking_text.contains("Waking account") && waking_text.contains("75% used"));
+        assert!(waking_text.contains("Waking account") && waking_text.contains("75.0% used"));
         assert!(waking_text.contains("Wake (w)"));
         app.grok_auth
             .sender
@@ -901,7 +1391,10 @@ mod usage_tests {
             .map(|cell| cell.symbol())
             .collect();
         assert!(text.contains("account@example.com") && text.contains("Grok accounts"));
-        assert!(text.contains("Refreshing usage") && text.contains("75% used"));
+        assert!(text.contains("Refreshing usage") && text.contains("75.0% used"));
+        assert!(
+            text.contains("━") && text.contains("─") && text.contains("Remaining allowance: 25.0%")
+        );
         assert!(text.contains("━") && text.contains("25.0%") && text.contains("$12.34"));
         assert!(!text.contains("SECRET"));
         let mut small = Terminal::new(TestBackend::new(40, 12)).unwrap();

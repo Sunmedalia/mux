@@ -1,4 +1,4 @@
-//! Read-only monitor, independent of the configuration editor and its sync loop.
+//! Monitor with explicit account switching, independent of the editor sync loop.
 use super::*;
 use crate::usage::{Query, Reader, Snapshot, Totals};
 use chrono::Timelike;
@@ -23,6 +23,7 @@ mod accounts;
 mod collector;
 mod focus;
 mod model;
+mod picker;
 mod render;
 mod widgets;
 #[cfg(test)]
@@ -117,6 +118,7 @@ pub(super) fn run(paths: AppPaths) -> Result<()> {
     let mut last_clock_redraw = Instant::now();
     let mut account_client = initial;
     let mut account_force = false;
+    let mut switching: Option<mpsc::Receiver<std::result::Result<String, String>>> = None;
     loop {
         if last_theme_check.elapsed() >= Duration::from_secs(2) {
             let theme = theme::PulseTheme::load(&theme_paths);
@@ -130,7 +132,9 @@ pub(super) fn run(paths: AppPaths) -> Result<()> {
             last_theme_check = Instant::now();
         }
         while let Ok(update) = active_updates.try_recv() {
-            monitor.apply_focus(update);
+            if monitor.picker.is_none() {
+                monitor.apply_focus(update);
+            }
             redraw = true;
         }
         while let Ok(snapshot) = session_updates.try_recv() {
@@ -153,6 +157,25 @@ pub(super) fn run(paths: AppPaths) -> Result<()> {
         }
         while let Ok(accounts) = account_updates.try_recv() {
             monitor.accounts = accounts;
+            redraw = true;
+        }
+        let completed = switching
+            .as_ref()
+            .and_then(|receiver| match receiver.try_recv() {
+                Ok(result) => Some(result),
+                Err(mpsc::TryRecvError::Disconnected) => Some(Err(
+                    "Account switch worker stopped; inspect the local login before retrying".into(),
+                )),
+                Err(mpsc::TryRecvError::Empty) => None,
+            });
+        if let Some(result) = completed {
+            if let Some(picker) = &mut monitor.picker {
+                monitor.client = picker.client;
+                picker.finish(result);
+                monitor.scroll = monitor.scroll.min(2);
+            }
+            switching = None;
+            account_force = true;
             redraw = true;
         }
         if (monitor.client != account_client || account_force)
@@ -178,7 +201,89 @@ pub(super) fn run(paths: AppPaths) -> Result<()> {
             continue;
         }
         redraw = true;
-        let key = match event::read()? {
+        let input = event::read()?;
+        let size = terminal.size()?;
+        let body = monitor.account_body(Rect::new(0, 0, size.width, size.height));
+        if let Some(picker) = &mut monitor.picker {
+            let was_selecting = picker.selecting();
+            let mut navigate = false;
+            let action = match &input {
+                Event::Key(k) if k.kind == event::KeyEventKind::Press => match k.code {
+                    KeyCode::PageDown => {
+                        monitor.scroll = monitor.scroll.saturating_add(10).min(monitor.limit);
+                        picker::Action::None
+                    }
+                    KeyCode::PageUp => {
+                        monitor.scroll = monitor.scroll.saturating_sub(10);
+                        picker::Action::None
+                    }
+                    KeyCode::Up | KeyCode::Down if !picker.selecting() => {
+                        if k.code == KeyCode::Down {
+                            monitor.scroll = monitor.scroll.saturating_add(1).min(monitor.limit);
+                        } else {
+                            monitor.scroll = monitor.scroll.saturating_sub(1);
+                        }
+                        picker::Action::None
+                    }
+                    _ => {
+                        navigate = picker.selecting()
+                            && matches!(
+                                k.code,
+                                KeyCode::Up
+                                    | KeyCode::Down
+                                    | KeyCode::Home
+                                    | KeyCode::End
+                                    | KeyCode::Char('j' | 'k')
+                            );
+                        picker.key(k.code)
+                    }
+                },
+                Event::Mouse(m) => {
+                    let wheel = matches!(
+                        m.kind,
+                        MouseEventKind::ScrollDown | MouseEventKind::ScrollUp
+                    );
+                    navigate = wheel && picker.list_hit(body, m.column, m.row, monitor.scroll);
+                    if wheel && !navigate {
+                        if m.kind == MouseEventKind::ScrollDown {
+                            monitor.scroll = monitor.scroll.saturating_add(3).min(monitor.limit);
+                        } else {
+                            monitor.scroll = monitor.scroll.saturating_sub(3);
+                        }
+                        picker::Action::None
+                    } else {
+                        picker.mouse(*m, body, monitor.scroll)
+                    }
+                }
+                _ => picker::Action::None,
+            };
+            if was_selecting && !picker.selecting() {
+                monitor.scroll = monitor.scroll.min(2);
+            }
+            if navigate && body.height > 0 {
+                let row = picker.selected_row().min(u16::MAX as usize) as u16;
+                if row < monitor.scroll {
+                    monitor.scroll = row;
+                } else if row >= monitor.scroll.saturating_add(body.height) {
+                    monitor.scroll = row.saturating_add(1).saturating_sub(body.height);
+                }
+            }
+            match action {
+                picker::Action::Close => monitor.picker = None,
+                picker::Action::Switch(client, id) => {
+                    let (send, receiver) = mpsc::channel();
+                    let paths = theme_paths.clone();
+                    std::thread::spawn(move || {
+                        let result = picker::switch(&paths, client, &id).map_err(|e| e.to_string());
+                        let _ = send.send(result);
+                    });
+                    switching = Some(receiver);
+                }
+                picker::Action::None => {}
+            }
+            continue;
+        }
+        let key = match input {
             Event::Key(k) if k.kind == event::KeyEventKind::Press => Some(k),
             Event::Mouse(m) => {
                 let size = terminal.size()?;
@@ -189,7 +294,23 @@ pub(super) fn run(paths: AppPaths) -> Result<()> {
                 } else {
                     screen.inner(Margin::new(2, 0))
                 };
-                let body = content_body(area);
+                let body = if mini {
+                    mini_body(area)
+                } else {
+                    content_body(area)
+                };
+                if m.kind == MouseEventKind::Down(MouseButton::Left)
+                    && monitor.account_hit(body, m.column, m.row)
+                {
+                    match picker::Picker::load(&theme_paths, monitor.client) {
+                        Ok(picker) => {
+                            monitor.picker = Some(picker);
+                            monitor.scroll = monitor.scroll.min(1);
+                        }
+                        Err(error) => monitor.notice = Some(format!("! {error}")),
+                    }
+                    continue;
+                }
                 let dragging = matches!(
                     m.kind,
                     MouseEventKind::Down(MouseButton::Left)
@@ -287,6 +408,15 @@ pub(super) fn run(paths: AppPaths) -> Result<()> {
             match key.code {
                 KeyCode::Char('q') => break,
                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
+                KeyCode::Char('a') if matches!(monitor.client, 1 | 2) => {
+                    match picker::Picker::load(&theme_paths, monitor.client) {
+                        Ok(picker) => {
+                            monitor.picker = Some(picker);
+                            monitor.scroll = monitor.scroll.min(1);
+                        }
+                        Err(error) => monitor.notice = Some(format!("! {error}")),
+                    }
+                }
                 KeyCode::Char('e') => {
                     monitor.notice = Some(match open_editor() {
                         Ok(()) => "↗ Editor opened in a new tab".into(),
@@ -607,6 +737,7 @@ mod tests {
         );
         for width in 0..=48 {
             assert!(compact_account_quota("codex 5h", 46.0, width).width() <= width.into());
+            assert!(compact_account_meter("Weekly credits", None, width).width() <= width.into());
         }
         let rare_failure = health_meter(
             &Totals {
@@ -1656,6 +1787,79 @@ mod account_page_tests {
         let focus = focused_agent(&panes, "test-tab").unwrap();
         assert_eq!(focus.client, 2);
         assert_eq!(focus.session.unwrap().client, "Grok");
+    }
+    #[test]
+    fn grok_and_codex_account_cards_share_the_same_layout() {
+        for unknown in [false, true] {
+            let card = accounts::Card {
+                id: Some("fixture".into()),
+                name: "Work account".into(),
+                email: "work@example.com".into(),
+                badge: "Pro".into(),
+                rows: vec![
+                    ("Login".into(), "● Local".into()),
+                    ("Accounts".into(), "2".into()),
+                    ("Updated".into(), "2m ago".into()),
+                ],
+                gauges: if unknown {
+                    vec![]
+                } else {
+                    vec![("Weekly".into(), 43.0, "10/06 22:00".into())]
+                },
+                unknown_gauge: unknown.then(|| ("Weekly".into(), "10/06 22:00".into())),
+                ..Default::default()
+            };
+            let mut monitor = Monitor::default();
+            monitor.accounts.codex.card = Some(card.clone());
+            monitor.accounts.grok.card = Some(card);
+            for visual in [true, false] {
+                monitor.visual_mode = visual;
+                for width in [20, 32, 48] {
+                    monitor.client = 1;
+                    let codex = monitor.account_content(width);
+                    monitor.client = 2;
+                    let grok = monitor.account_content(width);
+                    assert_eq!(codex[1..], grok[1..]);
+                    assert!(grok.iter().all(|line| line.width() <= width as usize));
+                }
+            }
+        }
+    }
+    #[test]
+    fn grok_unknown_quota_keeps_a_meter_and_balance_stays_separate() {
+        let mut monitor = Monitor {
+            client: 2,
+            ..Default::default()
+        };
+        monitor.accounts.grok.card = Some(accounts::Card {
+            name: "Grok".into(),
+            unknown_gauge: Some(("Weekly credits".into(), "10/06 22:51".into())),
+            rows: vec![
+                ("Quota".into(), "Usage not published".into()),
+                ("Balance".into(), "$0.00".into()),
+            ],
+            ..Default::default()
+        });
+        for visual in [true, false] {
+            monitor.visual_mode = visual;
+            let shown = monitor
+                .account_content(30)
+                .iter()
+                .map(Line::to_string)
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(shown.contains("Weekly") && shown.contains("—") && shown.contains('▒'));
+            assert!(shown.contains("Usage not published"));
+            if visual {
+                assert!(!shown.contains("Balance"));
+            } else {
+                assert!(
+                    shown.contains("Balance")
+                        && shown.find("Weekly credits").unwrap() < shown.find("Balance").unwrap()
+                );
+            }
+            assert!(!shown.contains("0% used"));
+        }
     }
     #[test]
     fn grok_account_is_first_without_wake_controls() {

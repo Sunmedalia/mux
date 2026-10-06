@@ -317,14 +317,22 @@ pub(super) fn quota_color(percent: f64) -> Color {
     }
 }
 pub(super) fn compact_account_quota(label: &str, percent: f64, width: u16) -> Line<'static> {
-    let percent = percent.clamp(0.0, 100.0);
-    let value = if percent.is_finite() {
-        format!("{percent:.0}%")
-    } else {
-        "—".into()
-    };
+    compact_account_meter(label, Some(percent), width)
+}
+pub(super) fn compact_account_meter(
+    label: &str,
+    percent: Option<f64>,
+    width: u16,
+) -> Line<'static> {
+    let percent = percent
+        .filter(|percent| percent.is_finite())
+        .map(|percent| percent.clamp(0.0, 100.0));
+    let value = percent
+        .map(|percent| format!("{percent:.0}%"))
+        .unwrap_or("—".into());
+    let color = percent.map(quota_color).unwrap_or(SOFT);
     if usize::from(width) <= value.width() + 2 {
-        return line(clipped(&value, width.into()), quota_color(percent));
+        return line(clipped(&value, width.into()), color);
     }
     let label = label.strip_prefix("codex ").unwrap_or(label);
     let label = clipped(
@@ -332,12 +340,15 @@ pub(super) fn compact_account_quota(label: &str, percent: f64, width: u16) -> Li
         usize::from(width).saturating_sub(value.width() + 2).min(12),
     );
     let cells = usize::from(width).saturating_sub(label.width() + value.width() + 2);
-    let color = quota_color(percent);
     let mut spans = vec![
         Span::styled(label, Style::default().fg(INK)),
         Span::raw(" "),
     ];
-    spans.extend(progress_spans(Some(percent / 100.0), cells, color));
+    if let Some(percent) = percent {
+        spans.extend(progress_spans(Some(percent / 100.0), cells, color));
+    } else {
+        spans.push(Span::styled("▒".repeat(cells), Style::default().fg(RAIL)));
+    }
     spans.push(Span::raw(" "));
     spans.push(Span::styled(
         value,
@@ -345,6 +356,7 @@ pub(super) fn compact_account_quota(label: &str, percent: f64, width: u16) -> Li
     ));
     Line::from(spans)
 }
+
 pub(super) fn meter(label: &str, fraction: Option<f64>, width: u16, color: Color) -> Line<'static> {
     let prefix = format!("{label} ");
     let cells = usize::from(width).saturating_sub(prefix.width());

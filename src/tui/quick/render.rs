@@ -11,12 +11,15 @@ impl Monitor {
         let Some(card) = &info.card else {
             out.push(line(
                 if info.lines.is_empty() {
-                    "◌ Loading…"
+                    "Select account ▾ [a]"
                 } else {
-                    "○ Account unavailable"
+                    "No active account ▾ [a]"
                 },
                 SOFT,
             ));
+            if let Some(picker) = &self.picker {
+                out.extend(picker.content(width));
+            }
             out.push(Line::default());
             return out;
         };
@@ -26,37 +29,38 @@ impl Monitor {
                 .iter()
                 .any(|(label, value)| label == "Login" && value.contains("Local"));
             let mut identity = pair(
-                &format!(
+                &format!("{} {}", if local { "●" } else { "○" }, card.name),
+                format!(
                     "{} {}",
-                    if local || (self.client == 2 && card.id.is_some()) {
-                        "●"
-                    } else {
-                        "○"
-                    },
-                    card.name
+                    card.badge.to_uppercase(),
+                    if self.picker.is_some() { "▴" } else { "▾" }
                 ),
-                card.badge.to_uppercase(),
                 width,
                 GREEN,
             );
             identity.spans[0].style = Style::default().fg(INK).add_modifier(Modifier::BOLD);
             out.push(identity);
         } else {
-            out.push(pair(&card.name, &card.badge, width, GREEN));
+            out.push(pair(
+                &card.name,
+                format!(
+                    "{} {}",
+                    card.badge,
+                    if self.picker.is_some() { "▴" } else { "▾" }
+                ),
+                width,
+                GREEN,
+            ));
+        }
+        if let Some(picker) = &self.picker {
+            out.extend(picker.content(width));
         }
         if !card.email.is_empty() {
             out.push(line(clipped(&card.email, width.into()), INK));
         }
         if self.visual_mode {
-            if !card.gauges.is_empty() {
-                out.push(line(
-                    if self.client == 2 {
-                        "CREDITS · USED"
-                    } else {
-                        "LIMITS · USED"
-                    },
-                    SOFT,
-                ));
+            if !card.gauges.is_empty() || card.unknown_gauge.is_some() {
+                out.push(line("LIMITS · USED", SOFT));
             }
             for (label, percent, reset) in &card.gauges {
                 out.push(compact_account_quota(label, *percent, width));
@@ -69,62 +73,45 @@ impl Monitor {
                     ));
                 }
             }
+            if let Some((label, reset)) = &card.unknown_gauge {
+                out.push(compact_account_meter(label, None, width));
+                if !reset.is_empty() {
+                    out.push(pair("↻", compact_reset(reset), width, SOFT));
+                }
+            }
             let row = |name| {
                 card.rows
                     .iter()
                     .find(|(label, _)| label == name)
                     .map(|(_, value)| value.as_str())
             };
-            if self.client == 1 {
-                if let Some(quota) = row("Quota") {
-                    out.push(line(quota, GOLD));
-                }
-                if let Some(switch) = row("Switch") {
-                    out.push(line(clipped(switch, width.into()), GOLD));
-                }
-                let login = row("Login")
-                    .map(|value| {
-                        if value.contains("Local") {
-                            "Local"
-                        } else {
-                            "Saved"
-                        }
-                    })
-                    .unwrap_or("API");
-                let state = row("Accounts")
-                    .map(|count| format!("{login} · {count} accounts"))
-                    .unwrap_or(login.into());
-                let age = compact_age(row("Updated").unwrap_or("—"));
-                out.push(pair(&state, age, width, SOFT));
-                if card.id.is_some() && card.gauges.is_empty() {
-                    out.push(line("○ Limits unavailable · r refresh", SOFT));
-                }
-            } else {
-                if card.gauges.is_empty() {
-                    out.push(line(
-                        clipped(
-                            row("Credits").unwrap_or("○ Credits unavailable · r refresh"),
-                            width.into(),
-                        ),
-                        SOFT,
-                    ));
-                }
-                if let Some(balance) = row("Balance") {
-                    out.push(pair("Balance", balance, width, GREEN));
-                }
-                if let Some(spend) = row("On demand") {
-                    out.push(pair("On demand", spend, width, SOFT));
-                }
-                if let Some(state) = row("Refresh") {
-                    out.push(pair("Usage", state, width, GOLD));
-                }
-                let models = row("Models").unwrap_or("0");
-                out.push(pair(
-                    &format!("◈ {models} models"),
-                    row("Default").unwrap_or("Native"),
-                    width,
-                    BLUE,
+            if let Some(quota) = row("Quota") {
+                out.push(line(
+                    clipped(quota, width.into()),
+                    if quota.starts_with('!') { GOLD } else { SOFT },
                 ));
+            }
+            if let Some(switch) = row("Switch") {
+                out.push(line(clipped(switch, width.into()), GOLD));
+            }
+            let login = row("Login")
+                .map(|value| {
+                    if value.contains("Expired") {
+                        "Expired"
+                    } else if value.contains("Local") {
+                        "Local"
+                    } else {
+                        "Saved"
+                    }
+                })
+                .unwrap_or("API");
+            let state = row("Accounts")
+                .map(|count| format!("{login} · {count} accounts"))
+                .unwrap_or(login.into());
+            let age = compact_age(row("Updated").unwrap_or("—"));
+            out.push(pair(&state, age, width, SOFT));
+            if card.id.is_some() && card.gauges.is_empty() && card.unknown_gauge.is_none() {
+                out.push(line("○ Limits unavailable · r refresh", SOFT));
             }
             out.push(Line::default());
             return out;
@@ -144,6 +131,14 @@ impl Monitor {
                     width,
                     SOFT,
                 ));
+            }
+        }
+        if let Some((label, reset)) = &card.unknown_gauge {
+            out.push(Line::default());
+            out.push(pair(label, "— used", width, SOFT));
+            out.push(line("▒".repeat(width.into()), RAIL));
+            if !reset.is_empty() {
+                out.push(pair("Reset", reset, width, SOFT));
             }
         }
         for (label, value) in &card.rows {
@@ -1156,6 +1151,8 @@ impl Monitor {
         if self.help {
             return vec![
                 section("ABOUT THIS DATA", width),
+                line("a: Codex / Grok accounts", BLUE),
+                line("↑↓ select · Enter confirm", SOFT),
                 Line::default(),
                 line("Current session: local log", INK),
                 line("for the focused agent pane.", INK),
@@ -1660,6 +1657,38 @@ impl Monitor {
         out
     }
     pub(super) fn draw(&mut self, f: &mut ratatui::Frame) {
+        self.draw_content(f);
+    }
+    pub(super) fn account_body(&self, screen: Rect) -> Rect {
+        let mini = screen.width < 32 || screen.height < 12;
+        let area = if mini {
+            screen
+        } else {
+            screen.inner(Margin::new(2, 0))
+        };
+        let body = if mini {
+            mini_body(area)
+        } else {
+            content_body(area)
+        };
+        let x = body.x.min(screen.right());
+        let y = body.y.min(screen.bottom());
+        Rect::new(
+            x,
+            y,
+            body.right().min(screen.right()).saturating_sub(x),
+            body.bottom().min(screen.bottom()).saturating_sub(y),
+        )
+    }
+    pub(super) fn account_hit(&self, body: Rect, x: u16, y: u16) -> bool {
+        matches!(self.client, 1 | 2)
+            && !self.help
+            && !self.sessions_mode
+            && !self.chart_mode
+            && contains(body, x, y)
+            && usize::from(y - body.y) + usize::from(self.scroll) == 1
+    }
+    fn draw_content(&mut self, f: &mut ratatui::Frame) {
         let area = f.area();
         f.render_widget(
             Block::default().style(Style::default().bg(BG).fg(INK)),
@@ -1761,12 +1790,12 @@ impl Monitor {
             } else {
                 "● Charts auto-update · c: Home".into()
             }
+        } else if let Some(note) = &self.notice {
+            note.clone()
         } else if self.client == 2 && self.error.is_none() {
             "● Auto-update · r refresh".into()
         } else if let Some(error) = &self.error {
             format!("! STALE · {error}")
-        } else if let Some(note) = &self.notice {
-            note.clone()
         } else if let Some(time) = self.refreshed {
             format!("● Checked {}s ago · every 2s", time.elapsed().as_secs())
         } else {

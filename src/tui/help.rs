@@ -330,7 +330,19 @@ pub(super) fn help_commands(section: HelpSection) -> &'static [(&'static str, &'
                 "Grok r / s / w",
                 "Refresh cached usage / refresh / wake and refresh",
             ),
-            ("Grok x", "Log out (Enter/y confirms; n/Esc cancels)"),
+            ("Grok a / ↑↓", "Focus saved accounts / select an account"),
+            (
+                "Grok p / i",
+                "Switch selected account (confirm) / import local login",
+            ),
+            (
+                "Grok X",
+                "Delete saved account (confirm; active account protected)",
+            ),
+            (
+                "Grok x",
+                "Sign out; keep saved accounts (confirmation required)",
+            ),
             ("Grok PgUp / PgDn", "Scroll account details or login output"),
             ("Grok Esc / q", "Back; Esc / Ctrl+C cancels an active login"),
             ("? / F2", "Help / switch agent when navigation is available"),

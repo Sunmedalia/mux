@@ -614,6 +614,7 @@ fn fullscreen_visual_capture() {
         selected: 1,
         model: field("Native model", "grok-build"),
         confirm_logout: false,
+        confirm_account: None,
         scroll: 0,
     });
     grok.select_home_index(1);
@@ -4931,7 +4932,7 @@ fn grok_oauth_provider_row_uses_home_keyboard_and_mouse_navigation() {
     .unwrap();
     app.select_client_tab(ClientTab::Grok);
     assert_eq!(app.home_prefix_count(), 2);
-    let before = std::fs::read(&app.paths.config).unwrap();
+    let before = crate::config::load(&app.paths.config).unwrap();
     let area = Rect::new(0, 0, 80, 36);
     let mut terminal = Terminal::new(TestBackend::new(area.width, area.height)).unwrap();
     terminal.draw(|frame| app.draw(frame)).unwrap();
@@ -4977,7 +4978,10 @@ fn grok_oauth_provider_row_uses_home_keyboard_and_mouse_navigation() {
     assert!(app.modal.is_none() && app.grok_auth.page.is_some());
     app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE))
         .unwrap();
-    assert_eq!(std::fs::read(&app.paths.config).unwrap(), before);
+    let mut after = crate::config::load(&app.paths.config).unwrap();
+    assert_eq!(after.grok.accounts.len(), 1);
+    after.grok.accounts.clear();
+    assert_eq!(after, before);
     app.select_client_tab(ClientTab::Claude);
     assert_eq!(app.home_prefix_count(), 1);
     assert!(!app.home_grok_oauth_selected());
