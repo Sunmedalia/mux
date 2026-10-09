@@ -4,6 +4,7 @@ mod codex;
 mod config;
 mod diagnostics;
 mod discovery;
+mod git;
 mod grok;
 mod herdr_install;
 mod import;

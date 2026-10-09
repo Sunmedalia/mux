@@ -431,9 +431,9 @@ mod tests {
         assert!(!monitor.account_hit(body, 3, 6));
         monitor.scroll = 1;
         assert!(monitor.account_hit(body, 3, 4));
-        monitor.chart_mode = true;
+        monitor.page = config::PulseStartPage::Charts;
         assert!(!monitor.account_hit(body, 3, 4));
-        monitor.chart_mode = false;
+        monitor.page = config::PulseStartPage::Home;
         monitor.client = 0;
         assert!(!monitor.account_hit(body, 3, 4));
     }

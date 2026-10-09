@@ -344,10 +344,10 @@ impl Monitor {
             return self.stats_content(width);
         }
         if self.client == 2 {
-            if self.sessions_mode {
+            if self.page == config::PulseStartPage::Sessions {
                 return self.session_content(width);
             }
-            if self.chart_mode {
+            if self.page == config::PulseStartPage::Charts {
                 return self.chart_content(width);
             }
             let mut out = self.account_content(width);
@@ -355,7 +355,9 @@ impl Monitor {
             out.extend(self.grok_tokens(width));
             return out;
         }
-        let mut out = if !self.sessions_mode && !self.chart_mode {
+        let mut out = if self.page != config::PulseStartPage::Sessions
+            && self.page != config::PulseStartPage::Charts
+        {
             self.account_content(width)
         } else {
             vec![]
@@ -370,7 +372,9 @@ impl Monitor {
         if self.client == 2 {
             return self.content(width);
         }
-        let mut out = if !self.sessions_mode && !self.chart_mode {
+        let mut out = if self.page != config::PulseStartPage::Sessions
+            && self.page != config::PulseStartPage::Charts
+        {
             self.account_content(width)
         } else {
             vec![]
@@ -391,7 +395,7 @@ impl Monitor {
             );
             return out;
         }
-        if self.sessions_mode {
+        if self.page == config::PulseStartPage::Sessions {
             let mut out = vec![mini_line("SESSIONS / ALL TIME", width, BLUE)];
             match (self.active_session.as_ref(), self.active_row()) {
                 (None, _) => out.push(mini_line("◌ Waiting for agent pane", width, SOFT)),
@@ -488,7 +492,7 @@ impl Monitor {
             }
             return out;
         }
-        if self.chart_mode {
+        if self.page == config::PulseStartPage::Charts {
             let gateway = metrics(&self.snapshot, self.client());
             let session = self.session_hours_today();
             let mut out = vec![
@@ -679,9 +683,9 @@ impl Monitor {
         }
         let title = if self.help {
             "HELP"
-        } else if self.sessions_mode {
+        } else if self.page == config::PulseStartPage::Sessions {
             "SESSIONS"
-        } else if self.chart_mode {
+        } else if self.page == config::PulseStartPage::Charts {
             "CHARTS"
         } else {
             "PULSE"
@@ -723,8 +727,8 @@ impl Monitor {
         if self.client != 2
             && self.visual_mode
             && !self.help
-            && !self.sessions_mode
-            && !self.chart_mode
+            && self.page != config::PulseStartPage::Sessions
+            && self.page != config::PulseStartPage::Charts
         {
             let totals = metrics(&self.snapshot, self.client()).total;
             content.insert(
@@ -742,9 +746,11 @@ impl Monitor {
                 format!("! {error}")
             } else if let Some(notice) = &self.notice {
                 notice.clone()
-            } else if self.sessions_mode && self.sessions_refreshed.is_none() {
+            } else if self.page == config::PulseStartPage::Sessions
+                && self.sessions_refreshed.is_none()
+            {
                 "◌ sessions".into()
-            } else if !self.sessions_mode && self.refreshed.is_none() {
+            } else if self.page != config::PulseStartPage::Sessions && self.refreshed.is_none() {
                 "◌ loading".into()
             } else if self.limit > 0 {
                 "↑↓ scroll".into()
@@ -759,7 +765,12 @@ impl Monitor {
         }
         for (label, rect) in [
             "e",
-            if self.sessions_mode { "t" } else { "c" },
+            "g",
+            if self.page == config::PulseStartPage::Sessions {
+                "t"
+            } else {
+                "c"
+            },
             "s",
             "r",
             "q",
@@ -779,7 +790,10 @@ impl Monitor {
         [Some("Claude"), Some("Codex"), Some("Grok"), None][self.client]
     }
     pub(super) fn provider_header_hit(&self, body: Rect, column: u16, row: u16) -> bool {
-        if self.sessions_mode || self.chart_mode || !contains(body, column, row) {
+        if self.page == config::PulseStartPage::Sessions
+            || self.page == config::PulseStartPage::Charts
+            || !contains(body, column, row)
+        {
             return false;
         }
         let Some(index) = self.content(body.width).iter().position(|line| {
@@ -1142,10 +1156,10 @@ impl Monitor {
         out
     }
     pub(super) fn stats_content(&self, width: u16) -> Vec<Line<'static>> {
-        if self.sessions_mode {
+        if self.page == config::PulseStartPage::Sessions {
             return self.session_content(width);
         }
-        if self.chart_mode && !self.help {
+        if self.page == config::PulseStartPage::Charts && !self.help {
             return self.chart_content(width);
         }
         if self.help {
@@ -1545,6 +1559,7 @@ impl Monitor {
                 line("Visual I/O: blue input,", SOFT),
                 line("gold output; bars show share.", SOFT),
                 line("s: Usage / Sessions", BLUE),
+                line("g: Git sidebar · ?: Git help", BLUE),
                 line("t: recent / tokens sort", BLUE),
                 line("? / Esc to return", BLUE),
                 line("v: text / visual view", BLUE),
@@ -1657,7 +1672,11 @@ impl Monitor {
         out
     }
     pub(super) fn draw(&mut self, f: &mut ratatui::Frame) {
-        self.draw_content(f);
+        if self.page == config::PulseStartPage::Git {
+            self.git.draw(f);
+        } else {
+            self.draw_content(f);
+        }
     }
     pub(super) fn account_body(&self, screen: Rect) -> Rect {
         let mini = screen.width < 32 || screen.height < 12;
@@ -1683,8 +1702,8 @@ impl Monitor {
     pub(super) fn account_hit(&self, body: Rect, x: u16, y: u16) -> bool {
         matches!(self.client, 1 | 2)
             && !self.help
-            && !self.sessions_mode
-            && !self.chart_mode
+            && self.page != config::PulseStartPage::Sessions
+            && self.page != config::PulseStartPage::Charts
             && contains(body, x, y)
             && usize::from(y - body.y) + usize::from(self.scroll) == 1
     }
@@ -1702,9 +1721,9 @@ impl Monitor {
         let inner = area.inner(Margin::new(2, 0));
         let title = if self.help {
             "◈ HELP"
-        } else if self.sessions_mode {
+        } else if self.page == config::PulseStartPage::Sessions {
             "◈ SESSIONS / ALL TIME"
-        } else if self.chart_mode {
+        } else if self.page == config::PulseStartPage::Charts {
             "◈ CHARTS / TODAY"
         } else {
             if self.client == 2 {
@@ -1770,7 +1789,7 @@ impl Monitor {
                 &mut state,
             );
         }
-        let status = if self.sessions_mode {
+        let status = if self.page == config::PulseStartPage::Sessions {
             if self.sessions.warnings > 0 {
                 format!("! {} logs unavailable · r retry", self.sessions.warnings)
             } else if let Some(time) = self.sessions_refreshed {
@@ -1781,7 +1800,7 @@ impl Monitor {
             } else {
                 "◌ Reading local sessions…".into()
             }
-        } else if self.chart_mode {
+        } else if self.page == config::PulseStartPage::Charts {
             if self.sessions.warnings > 0 {
                 format!(
                     "! {} session logs unavailable · r retry",
@@ -1803,8 +1822,10 @@ impl Monitor {
         };
         f.render_widget(
             Paragraph::new(status).style(Style::default().fg(
-                if ((self.sessions_mode || self.chart_mode) && self.sessions.warnings > 0)
-                    || (!self.sessions_mode && self.error.is_some())
+                if ((self.page == config::PulseStartPage::Sessions
+                    || self.page == config::PulseStartPage::Charts)
+                    && self.sessions.warnings > 0)
+                    || (self.page != config::PulseStartPage::Sessions && self.error.is_some())
                 {
                     RED
                 } else {
@@ -1819,28 +1840,37 @@ impl Monitor {
             } else {
                 "↗(e)"
             },
+            "Git(g)",
             if inner.width < 44 {
-                if self.sessions_mode { "T(t)" } else { "C(c)" }
-            } else if self.sessions_mode {
+                if self.page == config::PulseStartPage::Sessions {
+                    "T(t)"
+                } else {
+                    "C(c)"
+                }
+            } else if self.page == config::PulseStartPage::Sessions {
                 if self.sessions_sort_tokens {
                     "Recent(t)"
                 } else {
                     "Tokens(t)"
                 }
-            } else if self.chart_mode {
+            } else if self.page == config::PulseStartPage::Charts {
                 "Home(c)"
             } else {
                 "Chart(c)"
             },
             if inner.width < 36 {
-                if self.sessions_mode { "H(s)" } else { "S(s)" }
+                if self.page == config::PulseStartPage::Sessions {
+                    "H(s)"
+                } else {
+                    "S(s)"
+                }
             } else if inner.width < 44 {
-                if self.sessions_mode {
+                if self.page == config::PulseStartPage::Sessions {
                     "Home(s)"
                 } else {
                     "Sess(s)"
                 }
-            } else if self.sessions_mode {
+            } else if self.page == config::PulseStartPage::Sessions {
                 "Home(s)"
             } else {
                 "Sessions(s)"
@@ -1851,6 +1881,13 @@ impl Monitor {
         .into_iter()
         .zip(buttons(inner))
         {
+            let compact;
+            let label = if label.width() > usize::from(rect.width) {
+                compact = label.find('(').map(|i| &label[i..]).unwrap_or(label);
+                compact
+            } else {
+                label
+            };
             f.render_widget(
                 Paragraph::new(label)
                     .alignment(Alignment::Center)

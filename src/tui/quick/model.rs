@@ -8,8 +8,8 @@ pub(super) struct Monitor {
     pub(super) snapshot: Snapshot,
     pub(super) sessions: crate::sessions::Snapshot,
     pub(super) sessions_refreshed: Option<Instant>,
-    pub(super) sessions_mode: bool,
-    pub(super) chart_mode: bool,
+    pub(super) page: config::PulseStartPage,
+    pub(super) git: git::GitPane,
     pub(super) visual_mode: bool,
     pub(super) preferences: config::UiPreferences,
     pub(super) roomy_visual: bool,
@@ -37,8 +37,7 @@ impl Monitor {
     }
 
     pub(super) fn apply_start_page(&mut self) {
-        self.sessions_mode = self.preferences.pulse_start_page == config::PulseStartPage::Sessions;
-        self.chart_mode = self.preferences.pulse_start_page == config::PulseStartPage::Charts;
+        self.page = self.preferences.pulse_start_page;
     }
 
     pub(super) fn refresh_preferences(&mut self, preferences: config::UiPreferences) -> bool {

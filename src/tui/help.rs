@@ -440,6 +440,31 @@ pub(super) fn help_commands(section: HelpSection) -> &'static [(&'static str, &'
             ("?", "Toggle monitor help"),
             ("Tab / 1–4", "Cycle / select agent"),
             ("e", "Open editor in a new tab"),
+            (
+                "g",
+                "Git sidebar / return to usage; follows focused terminal directory",
+            ),
+            ("Git Enter / [ ]", "Open Diff / select a difference block"),
+            (
+                "Git , / . / Esc",
+                "Diff: previous / next file / return to file list",
+            ),
+            (
+                "Git w",
+                "Diff: toggle wrapping; off enables horizontal scrolling",
+            ),
+            (
+                "Git a / u / d",
+                "Stage / unstage / discard file or selected hunk",
+            ),
+            (
+                "Git n / b / o",
+                "Commit / branches / all operations including Fetch, Pull and Push",
+            ),
+            (
+                "Git Ctrl+Enter",
+                "Review commit title and body before confirmation",
+            ),
             ("r", "Refresh account usage and sessions"),
             ("m", "Summary: toggle model / provider breakdown"),
             ("s / c / v", "Toggle sessions / chart / visual view"),

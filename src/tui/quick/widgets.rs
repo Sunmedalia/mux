@@ -480,17 +480,7 @@ pub(super) fn gateway_cache_meter(t: &Totals, unknown: bool, width: u16) -> Vec<
     vec![Line::from(spans)]
 }
 pub(super) fn buttons(area: Rect) -> Vec<Rect> {
-    let constraints = if area.width >= 44 {
-        vec![
-            Constraint::Length(10),
-            Constraint::Min(6),
-            Constraint::Length(12),
-            Constraint::Length(6),
-            Constraint::Length(6),
-        ]
-    } else {
-        vec![Constraint::Ratio(1, 5); 5]
-    };
+    let constraints = vec![Constraint::Ratio(1, 6); 6];
     Layout::horizontal(constraints)
         .split(Rect::new(
             area.x,
@@ -517,7 +507,7 @@ pub(super) fn mini_body(area: Rect) -> Rect {
     )
 }
 pub(super) fn mini_buttons(area: Rect) -> Vec<Rect> {
-    Layout::horizontal([Constraint::Ratio(1, 5); 5])
+    Layout::horizontal([Constraint::Ratio(1, 6); 6])
         .split(Rect::new(
             area.x,
             area.bottom().saturating_sub(1),

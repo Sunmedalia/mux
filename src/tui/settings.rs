@@ -462,6 +462,7 @@ impl UiOptions {
                 config::PulseStartPage::Home => "Home",
                 config::PulseStartPage::Sessions => "Sessions",
                 config::PulseStartPage::Charts => "Charts",
+                config::PulseStartPage::Git => "Git",
             }
             .into(),
             (OptionsKind::Pulse, _) => if self.edited.pulse_sort_tokens {
@@ -502,14 +503,13 @@ impl UiOptions {
             (OptionsKind::Pulse, 0) => self.edited.pulse_visual = !self.edited.pulse_visual,
             (OptionsKind::Pulse, 1) => self.edited.pulse_models = !self.edited.pulse_models,
             (OptionsKind::Pulse, 2) => {
+                use config::PulseStartPage::*;
                 self.edited.pulse_start_page = match (self.edited.pulse_start_page, forward) {
-                    (config::PulseStartPage::Home, true)
-                    | (config::PulseStartPage::Charts, false) => config::PulseStartPage::Sessions,
-                    (config::PulseStartPage::Sessions, true) => config::PulseStartPage::Charts,
-                    (config::PulseStartPage::Sessions, false) => config::PulseStartPage::Home,
-                    (config::PulseStartPage::Charts, true) => config::PulseStartPage::Home,
-                    (config::PulseStartPage::Home, false) => config::PulseStartPage::Charts,
-                }
+                    (Home, true) | (Charts, false) => Sessions,
+                    (Sessions, true) | (Git, false) => Charts,
+                    (Charts, true) | (Home, false) => Git,
+                    (Git, true) | (Sessions, false) => Home,
+                };
             }
             (OptionsKind::Pulse, _) => {
                 self.edited.pulse_sort_tokens = !self.edited.pulse_sort_tokens

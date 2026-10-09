@@ -247,7 +247,7 @@ impl Monitor {
         }
         if focus_changed || agent_changed || session_changed {
             self.active_session = update.session;
-            if self.sessions_mode {
+            if self.page == config::PulseStartPage::Sessions {
                 self.scroll = 0;
             }
         }

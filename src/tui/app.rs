@@ -790,10 +790,10 @@ impl App {
         self.background.status = sync::Status::NotConnected;
         self.status_error = false;
         self.status = if conflicts.is_empty() {
-            "Disconnected; previous Claude preferences restored".into()
+            "Disconnected on disk; restart Claude in a new session".into()
         } else {
             format!(
-                "Disconnected; external edits preserved: {}",
+                "Disconnected; restart Claude in a new session. External edits preserved: {}",
                 conflicts.join(", ")
             )
         };

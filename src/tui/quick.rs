@@ -22,6 +22,7 @@ const LABEL: &str = "Mux Pulse";
 mod accounts;
 mod collector;
 mod focus;
+mod git;
 mod model;
 mod picker;
 mod render;
@@ -112,6 +113,7 @@ pub(super) fn run(paths: AppPaths) -> Result<()> {
         monitor.apply_preferences(config.ui);
         monitor.apply_start_page();
     }
+    monitor.git.start();
     spawn_session_reader(session_send, session_requests, session_refresh.clone());
     let mut redraw = true;
     let mut last_theme_check = Instant::now();
@@ -120,6 +122,7 @@ pub(super) fn run(paths: AppPaths) -> Result<()> {
     let mut account_force = false;
     let mut switching: Option<mpsc::Receiver<std::result::Result<String, String>>> = None;
     loop {
+        redraw |= monitor.git.poll();
         if last_theme_check.elapsed() >= Duration::from_secs(2) {
             let theme = theme::PulseTheme::load(&theme_paths);
             if monitor.pulse_theme != theme {
@@ -202,6 +205,25 @@ pub(super) fn run(paths: AppPaths) -> Result<()> {
         }
         redraw = true;
         let input = event::read()?;
+        if monitor.page == config::PulseStartPage::Git {
+            if monitor.git.input(&input) {
+                continue;
+            }
+            match &input {
+                Event::Key(k)
+                    if k.code == KeyCode::Char('q')
+                        || (k.code == KeyCode::Char('c')
+                            && k.modifiers.contains(KeyModifiers::CONTROL)) =>
+                {
+                    break;
+                }
+                _ => {
+                    monitor.page = config::PulseStartPage::Home;
+                    monitor.scroll = 0;
+                    continue;
+                }
+            }
+        }
         let size = terminal.size()?;
         let body = monitor.account_body(Rect::new(0, 0, size.width, size.height));
         if let Some(picker) = &mut monitor.picker {
@@ -384,7 +406,14 @@ pub(super) fn run(paths: AppPaths) -> Result<()> {
                             .map(|i| {
                                 [
                                     KeyCode::Char('e'),
-                                    KeyCode::Char(if monitor.sessions_mode { 't' } else { 'c' }),
+                                    KeyCode::Char('g'),
+                                    KeyCode::Char(
+                                        if monitor.page == config::PulseStartPage::Sessions {
+                                            't'
+                                        } else {
+                                            'c'
+                                        },
+                                    ),
                                     KeyCode::Char('s'),
                                     KeyCode::Char('r'),
                                     KeyCode::Char('q'),
@@ -417,13 +446,21 @@ pub(super) fn run(paths: AppPaths) -> Result<()> {
                         Err(error) => monitor.notice = Some(format!("! {error}")),
                     }
                 }
+                KeyCode::Char('g') => {
+                    monitor.page = config::PulseStartPage::Git;
+                    monitor.help = false;
+                    monitor.scroll = 0;
+                }
                 KeyCode::Char('e') => {
                     monitor.notice = Some(match open_editor() {
                         Ok(()) => "↗ Editor opened in a new tab".into(),
                         Err(e) => format!("! {e}"),
                     });
                 }
-                KeyCode::Char('m') if !monitor.sessions_mode && !monitor.chart_mode => {
+                KeyCode::Char('m')
+                    if monitor.page != config::PulseStartPage::Sessions
+                        && monitor.page != config::PulseStartPage::Charts =>
+                {
                     monitor.help = false;
                     monitor.models = !monitor.models;
                     monitor.scroll = monitor
@@ -436,7 +473,7 @@ pub(super) fn run(paths: AppPaths) -> Result<()> {
                         })
                         .unwrap_or(0) as u16;
                 }
-                KeyCode::Char('t') if monitor.sessions_mode => {
+                KeyCode::Char('t') if monitor.page == config::PulseStartPage::Sessions => {
                     monitor.help = false;
                     monitor.sessions_sort_tokens = !monitor.sessions_sort_tokens;
                     monitor.scroll = 0;
@@ -447,17 +484,23 @@ pub(super) fn run(paths: AppPaths) -> Result<()> {
                     monitor.scroll = 0;
                 }
                 KeyCode::Char('c') => {
-                    monitor.chart_mode = !monitor.chart_mode;
-                    monitor.sessions_mode = false;
+                    monitor.page = if monitor.page == config::PulseStartPage::Charts {
+                        config::PulseStartPage::Home
+                    } else {
+                        config::PulseStartPage::Charts
+                    };
                     monitor.help = false;
                     monitor.scroll = 0;
                 }
                 KeyCode::Char('s') => {
-                    monitor.sessions_mode = !monitor.sessions_mode;
-                    monitor.chart_mode = false;
+                    monitor.page = if monitor.page == config::PulseStartPage::Sessions {
+                        config::PulseStartPage::Home
+                    } else {
+                        config::PulseStartPage::Sessions
+                    };
                     monitor.help = false;
                     monitor.scroll = 0;
-                    if monitor.sessions_mode
+                    if monitor.page == config::PulseStartPage::Sessions
                         && let Some(client) = monitor.focused_client
                     {
                         monitor.client = client;
@@ -688,15 +731,14 @@ mod tests {
         monitor.apply_preferences(settings.clone());
         monitor.apply_start_page();
         assert!(monitor.visual_mode && monitor.models && monitor.sessions_sort_tokens);
-        assert!(monitor.sessions_mode && !monitor.chart_mode);
-        monitor.sessions_mode = false;
-        monitor.chart_mode = true;
+        assert_eq!(monitor.page, config::PulseStartPage::Sessions);
+        monitor.page = config::PulseStartPage::Charts;
         assert!(monitor.refresh_preferences(config::UiPreferences {
             pulse_visual: false,
             ..settings
         }));
         assert!(!monitor.visual_mode);
-        assert!(monitor.chart_mode && !monitor.sessions_mode);
+        assert_eq!(monitor.page, config::PulseStartPage::Charts);
         monitor.visual_mode = true;
         let mut unrelated = monitor.preferences.clone();
         unrelated.claude_new_model_1m = false;
@@ -953,7 +995,7 @@ mod tests {
     #[test]
     fn sessions_filter_follows_focused_agent_even_when_session_id_is_missing() {
         let mut monitor = Monitor {
-            sessions_mode: true,
+            page: config::PulseStartPage::Sessions,
             client: 3,
             ..Default::default()
         };
@@ -1147,7 +1189,7 @@ mod tests {
                 .collect::<Vec<_>>()
         );
 
-        m.sessions_mode = true;
+        m.page = config::PulseStartPage::Sessions;
         m.sessions_refreshed = Some(Instant::now());
         let history = m
             .content(28)
@@ -1264,7 +1306,7 @@ mod tests {
                 assert!(text.contains(expected), "missing {expected}: {text}");
             }
             assert!(home.iter().all(|line| line.width() <= width as usize));
-            m.sessions_mode = true;
+            m.page = config::PulseStartPage::Sessions;
             let history = m.content(width);
             let text = history
                 .iter()
@@ -1275,7 +1317,7 @@ mod tests {
                 assert!(text.contains(expected), "missing {expected}: {text}");
             }
             assert!(history.iter().all(|line| line.width() <= width as usize));
-            m.sessions_mode = false;
+            m.page = config::PulseStartPage::Home;
         }
         let mut terminal = ratatui::Terminal::new(TestBackend::new(48, 30)).unwrap();
         terminal.draw(|frame| m.draw(frame)).unwrap();
@@ -1361,7 +1403,7 @@ mod tests {
                 client: "Claude",
                 id: "current".into(),
             }),
-            chart_mode: true,
+            page: config::PulseStartPage::Charts,
             ..Default::default()
         };
         m.snapshot.offset = 0;
@@ -1412,7 +1454,7 @@ mod tests {
                 source_pane: Some("source".into()),
                 ..Default::default()
             };
-            monitor.sessions_mode = true;
+            monitor.page = config::PulseStartPage::Sessions;
             monitor.sessions.rows = (0..50)
                 .map(|index| crate::sessions::Session {
                     id: format!("session-{index}"),
@@ -1460,7 +1502,7 @@ mod tests {
     #[test]
     fn sidepane_sessions_render_and_filter_without_proxy_usage() {
         let mut m = Monitor {
-            sessions_mode: true,
+            page: config::PulseStartPage::Sessions,
             sessions_refreshed: Some(Instant::now()),
             client: 3,
             ..Default::default()

@@ -61,6 +61,7 @@ mux import --yes
 - [本地代理、资源设置与用量统计](docs/proxy.md)
 - [命令行、配置、安全、更新与卸载](docs/operations.md)
 - [Herdr Pulse 常驻监控](docs/pulse.md)
+- [Herdr Pulse Git 侧栏：Diff、暂存、提交、分支与远端操作](docs/pulse.md#git-侧栏)
 - [开发、测试与性能基准](docs/development.md)
 
 代理资源可以在 Settings → Proxy → Limits 中调整，默认允许 16 个在途请求、2 个 Token 估算任务和 32 MiB 正文；保存后重启代理生效。
