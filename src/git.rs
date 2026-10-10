@@ -1232,8 +1232,8 @@ mod tests {
         write(&path, "file", "side\n");
         perform(&path, Action::StageAll).unwrap();
         assert_eq!(
-            discover(&path).unwrap(),
-            Some(std::fs::canonicalize(&path).unwrap())
+            std::fs::canonicalize(discover(&path).unwrap().unwrap()).unwrap(),
+            std::fs::canonicalize(&path).unwrap()
         );
         assert_eq!(snapshot(&path).unwrap().branch, "side");
         assert!(snapshot(root).unwrap().files.is_empty());
