@@ -1236,7 +1236,7 @@ impl GitPane {
                         continue;
                     }
                     let controls = self.controls(navigation);
-                    if let Some(index) = control_rects(self.screen, row, controls.len())
+                    if let Some(index) = control_rects(self.screen, row, &controls)
                         .iter()
                         .position(|rect| contains(*rect, mouse.column, mouse.row))
                         && let Some(control) = controls.get(index).filter(|control| control.enabled)
@@ -1695,31 +1695,28 @@ impl GitPane {
                         } else {
                             "Stage file(s)"
                         },
-                        if index && block {
-                            "u Block"
-                        } else if index {
-                            "u File"
-                        } else {
-                            "Stage(s)"
-                        },
+                        if index { "Unstage" } else { "Stage(s)" },
                         KeyCode::Char(if index { 'u' } else { 's' }),
                     );
                     single.enabled = file.is_some();
+                    single.minimum_width = if index { 7 } else { 0 };
                     let mut stage = control("Stage all(a)", "All(a)", KeyCode::Char('a'));
                     stage.enabled = self
                         .snapshot
                         .as_ref()
                         .is_some_and(|s| s.files.iter().any(|f| f.group != Group::Index));
                     let second = if file.as_ref().is_some_and(|f| f.group == Group::Worktree) {
-                        control(
+                        let mut discard = control(
                             if block {
                                 "Discard block(d)"
                             } else {
                                 "Discard file(d)"
                             },
-                            if block { "d Block" } else { "d File" },
+                            "Discard",
                             KeyCode::Char('d'),
-                        )
+                        );
+                        discard.minimum_width = 7;
+                        discard
                     } else {
                         control("Refresh(r)", "r Refresh", KeyCode::Char('r'))
                     };
@@ -2210,10 +2207,7 @@ impl GitPane {
                 .bottom()
                 .saturating_sub(if navigation { 2 } else { 1 });
             let controls = self.controls(navigation);
-            for (control, rect) in controls
-                .iter()
-                .zip(control_rects(screen, row, controls.len()))
-            {
+            for (control, rect) in controls.iter().zip(control_rects(screen, row, &controls)) {
                 frame.render_widget(
                     Paragraph::new(control.label(rect.width))
                         .alignment(Alignment::Center)
@@ -2332,6 +2326,7 @@ struct Control {
     compact: &'static str,
     key: KeyEvent,
     enabled: bool,
+    minimum_width: u16,
 }
 impl Control {
     fn new(label: &'static str, compact: &'static str, code: KeyCode) -> Self {
@@ -2340,6 +2335,7 @@ impl Control {
             compact,
             key: KeyEvent::new(code, KeyModifiers::NONE),
             enabled: true,
+            minimum_width: 0,
         }
     }
     fn label(&self, width: u16) -> String {
@@ -2362,11 +2358,21 @@ impl Control {
         }
     }
 }
-fn control_rects(screen: Rect, row: u16, count: usize) -> Vec<Rect> {
+fn control_rects(screen: Rect, row: u16, controls: &[Control]) -> Vec<Rect> {
+    let count = controls.len();
     if count == 0 {
         return vec![];
     }
-    Layout::horizontal(vec![Constraint::Ratio(1, count as u32); count])
+    let constraints = controls.iter().map(|control| {
+        if control.minimum_width > screen.width / count as u16
+            && screen.width >= control.minimum_width + count as u16 - 1
+        {
+            Constraint::Min(control.minimum_width)
+        } else {
+            Constraint::Ratio(1, count as u32)
+        }
+    });
+    Layout::horizontal(constraints)
         .split(Rect::new(screen.x, row, screen.width, 1))
         .to_vec()
 }
@@ -3110,7 +3116,7 @@ mod tests {
         assert_eq!(pane.selected, 1);
         let text = render(&mut pane, 48, 20);
         assert!(text.contains("File 2/2"));
-        assert!(text.contains("u Block"));
+        assert!(text.contains("Unstage"));
         assert!(!text.contains("Discard(d)"));
         let controls = pane.controls(true);
         assert!(controls[0].enabled);
@@ -3131,14 +3137,62 @@ mod tests {
             render(&mut pane, width, 20);
             for navigation in [false, true] {
                 let controls = pane.controls(navigation);
-                for (control, rect) in
-                    controls
-                        .iter()
-                        .zip(control_rects(pane.screen, 0, controls.len()))
+                for (control, rect) in controls
+                    .iter()
+                    .zip(control_rects(pane.screen, 0, &controls))
                 {
                     assert!(control.label(rect.width).width() <= usize::from(rect.width));
                 }
             }
+        }
+        for width in [20, 28, 32, 48] {
+            for block in [false, true] {
+                let mut unstaged = diff_pane();
+                if !block {
+                    unstaged.diff.as_mut().unwrap().hunks.clear();
+                }
+                let (send, receive) = mpsc::sync_channel(1);
+                unstaged.requests = Some(send);
+                let text = render(&mut unstaged, width, 20);
+                let controls = unstaged.controls(false);
+                let rect = control_rects(unstaged.screen, 19, &controls)[2];
+                assert_eq!(controls[2].label(rect.width), "Discard", "{width} columns");
+                assert!(text.contains("Discard"));
+                unstaged.input(&Event::Mouse(MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: rect.right() - 1,
+                    row: rect.y,
+                    modifiers: KeyModifiers::NONE,
+                }));
+                let Some(Modal::Confirm { action, .. }) = unstaged.modal else {
+                    panic!("Discard must require confirmation");
+                };
+                if block {
+                    assert!(matches!(action, Action::Hunk { discard: true, .. }));
+                } else {
+                    assert!(matches!(action, Action::Discard(_)));
+                }
+                assert!(receive.try_recv().is_err());
+            }
+            let mut staged = diff_pane();
+            staged.selected = 1;
+            staged.diff = None;
+            let (send, receive) = mpsc::sync_channel(1);
+            staged.requests = Some(send);
+            let text = render(&mut staged, width, 20);
+            let controls = staged.controls(false);
+            let rect = control_rects(staged.screen, 19, &controls)[0];
+            assert_eq!(controls[0].label(rect.width), "Unstage", "{width} columns");
+            assert!(text.contains("Unstage"));
+            staged.input(&Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: rect.right() - 1,
+                row: rect.y,
+                modifiers: KeyModifiers::NONE,
+            }));
+            assert!(
+                matches!(receive.try_recv().unwrap(), Request::Execute(_, Action::Unstage(file)) if file.path.as_path() == std::path::Path::new("staged.rs"))
+            );
         }
         render(&mut pane, 48, 20);
         assert!(!pane.controls(true)[0].enabled);
@@ -3256,7 +3310,7 @@ mod tests {
     }
     fn click_footer(pane: &mut GitPane, navigation: bool, index: usize) {
         let row = pane.screen.bottom() - if navigation { 2 } else { 1 };
-        let rect = control_rects(pane.screen, row, pane.controls(navigation).len())[index];
+        let rect = control_rects(pane.screen, row, &pane.controls(navigation))[index];
         pane.input(&Event::Mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: rect.x,
