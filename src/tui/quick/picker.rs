@@ -361,6 +361,9 @@ mod tests {
             };
             let area = monitor.account_body(Rect::new(0, 0, width, height));
             assert!(area.right() <= width && area.bottom() <= height);
+            assert!(
+                !monitor.workspace_shortcut(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE))
+            );
             terminal.draw(|f| monitor.draw(f)).unwrap();
             monitor.picker.as_mut().unwrap().key(KeyCode::Enter);
             terminal.draw(|f| monitor.draw(f)).unwrap();
@@ -374,7 +377,7 @@ mod tests {
                 let buffer = terminal.backend().buffer();
                 let first: String = (0..width).map(|x| buffer[(x, 0)].symbol()).collect();
                 assert!(
-                    first.contains("TOKEN") && first.contains("GIT"),
+                    first.contains("TOKEN") && first.contains("[Git(g)]"),
                     "Background header stays visible: {first}"
                 );
             }

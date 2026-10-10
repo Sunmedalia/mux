@@ -57,14 +57,18 @@ impl Monitor {
 
     pub(super) fn workspace_shortcut(&mut self, key: KeyEvent) -> bool {
         if key.kind != event::KeyEventKind::Press
-            || key.modifiers != KeyModifiers::ALT
-            || !matches!(key.code, KeyCode::Char('1' | '2'))
             || self.picker.is_some()
             || (self.page == config::PulseStartPage::Git && !self.git.can_switch_workspace())
         {
             return false;
         }
-        self.select_workspace(key.code == KeyCode::Char('2'));
+        let git = match (key.code, key.modifiers) {
+            (KeyCode::Char('g'), KeyModifiers::NONE) => self.page != config::PulseStartPage::Git,
+            (KeyCode::Char('1'), KeyModifiers::ALT) => false,
+            (KeyCode::Char('2'), KeyModifiers::ALT) => true,
+            _ => return false,
+        };
+        self.select_workspace(git);
         true
     }
 

@@ -8,12 +8,16 @@ impl Monitor {
             _ => false,
         }
     }
-    pub(super) fn header_git_rect(&self, area: Rect, mini: bool) -> Rect {
-        page_tab_rects(area, if mini { 4 } else { 9 })[1]
+    pub(super) fn header_switch_rect(&self, area: Rect, mini: bool) -> Rect {
+        page_header_rects(
+            area,
+            if mini { 4 } else { 9 },
+            self.page == config::PulseStartPage::Git,
+        )[1]
     }
     fn draw_token_header(&self, f: &mut ratatui::Frame, area: Rect, mini: bool) {
         let reserve = if mini { 4 } else { 9 };
-        draw_page_tabs(f, area, reserve, false, self.picker.is_none());
+        draw_page_header(f, area, reserve, false, self.picker.is_none());
         let suffix = if self.help {
             "HELP"
         } else if self.page == config::PulseStartPage::Sessions {
@@ -23,7 +27,9 @@ impl Monitor {
         } else {
             ""
         };
-        let x = page_tab_rects(area, reserve)[1].right().saturating_add(2);
+        let x = page_header_rects(area, reserve, false)[1]
+            .right()
+            .saturating_add(2);
         let width = area.right().saturating_sub(reserve).saturating_sub(x);
         if suffix.width() <= usize::from(width) {
             f.render_widget(
@@ -701,7 +707,7 @@ impl Monitor {
         if area.width >= 10 {
             f.render_widget(
                 Paragraph::new("v ?").style(Style::default().fg(SOFT)),
-                Rect::new(area.right().saturating_sub(4), area.y, 4, 1),
+                Rect::new(area.right().saturating_sub(3), area.y, 3, 1),
             );
         }
         let tabs = Layout::horizontal([Constraint::Ratio(1, 4); 4]).split(Rect::new(

@@ -88,7 +88,7 @@ mux import --yes
 
 ## Herdr Pulse：TOKEN 与 Git
 
-侧栏顶部用 **TOKEN / GIT** 分段页签互斥选择，`●` 标记当前页，`○` 标记另一页；点击当前页不重置内容。**Alt+1 / Alt+2** 分别选择 TOKEN / GIT，也可按 `T` / `g` 直接选择；切回时保留 TOKEN 的统计子页、筛选和滚动位置，以及 Git 的文件选择、Diff 或 Log。处理操作或编辑表单时切换置灰，先完成或取消当前操作。TOKEN 页展示今日网关用量、当前会话 Token 和账号额度；Git 页跟随同一标签页最近聚焦终端的仓库，支持子目录和 worktree。`e` 打开完整 Mux 编辑器，`q` 关闭侧栏。
+侧栏顶部以粗体标题和细竖线强调当前页面，旁边是浅色切换入口：**TOKEN [Git(g)]** / **GIT [Token(g)]**。点击方括号按钮或按 `g` 双向切换，标题仅标识当前页面；窄窗口自动简化标签。**Alt+1 / Alt+2** 分别直接选择 TOKEN / GIT，`T` 也可直接返回 TOKEN；切回时保留 TOKEN 的统计子页、筛选和滚动位置，以及 Git 的文件选择、Diff 或 Log。处理操作或编辑表单时切换置灰，先完成或取消当前操作。TOKEN 页展示今日网关用量、当前会话 Token 和账号额度；Git 页跟随同一标签页最近聚焦终端的仓库，支持子目录和 worktree。`e` 打开完整 Mux 编辑器，`q` 关闭侧栏。
 
 Codex 使用 ChatGPT 账号、Grok 使用 OAuth 原生模型时，TOKEN 首页自动隐藏网关 TOKENS 和 CALL HEALTH，保留账号额度与本地会话 Token；切回 API 网关后恢复显示。文字版、简洁版和窄窗口采用相同规则。
 

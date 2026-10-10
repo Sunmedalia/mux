@@ -710,7 +710,7 @@ impl GitPane {
         let last = history.commits.len().saturating_sub(1);
         match key.code {
             KeyCode::Char('T' | 'q') => return false,
-            KeyCode::Char('g') => {}
+            KeyCode::Char('g') if key.modifiers == KeyModifiers::NONE => return false,
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return false,
             KeyCode::Esc | KeyCode::Char('L') => {
                 self.history = None;
@@ -988,7 +988,7 @@ impl GitPane {
         }
         match key.code {
             KeyCode::Char('T') => return false,
-            KeyCode::Char('g') => {}
+            KeyCode::Char('g') if key.modifiers == KeyModifiers::NONE => return false,
             KeyCode::Char('q') => return false,
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => return false,
             KeyCode::Char(',') if self.diff.is_some() => self.switch_diff_file(false),
@@ -1211,8 +1211,8 @@ impl GitPane {
                 }
                 if mouse.row == 0 {
                     let (area, reserve) = pulse_header_area(self.screen);
-                    let tabs = page_tab_rects(area, reserve);
-                    if self.modal.is_none() && contains(tabs[0], mouse.column, mouse.row) {
+                    let button = page_header_rects(area, reserve, true)[1];
+                    if self.modal.is_none() && contains(button, mouse.column, mouse.row) {
                         return false;
                     }
                     return true;
@@ -2027,7 +2027,7 @@ impl GitPane {
         headers.truncate(usize::from(area.height.saturating_sub(footer_height + 2)));
         let header_height = headers.len() as u16;
         let (header_area, reserve) = pulse_header_area(screen);
-        draw_page_tabs(
+        draw_page_header(
             frame,
             header_area,
             reserve,
@@ -2532,7 +2532,7 @@ mod tests {
                 assert!(text.contains("UNSTAGED"));
                 assert!(text.contains("STAGED"));
             }
-            assert!(pane.key(key(KeyCode::Char('g'))));
+            assert!(!pane.key(key(KeyCode::Char('g'))));
             assert!(!pane.key(key(KeyCode::Char('T'))));
         }
     }
@@ -3202,18 +3202,21 @@ mod tests {
         assert!(row(19).contains("All(a)"));
     }
     #[test]
-    fn token_tab_returns_home_without_losing_diff_and_git_tab_keeps_context() {
+    fn header_switch_returns_to_token_without_losing_diff_and_title_keeps_context() {
         for (width, height) in [(20, 10), (32, 12), (48, 20), (100, 40)] {
             let mut pane = diff_pane();
             let text = render(&mut pane, width, height);
             let (area, reserve) = pulse_header_area(pane.screen);
-            let tabs = page_tab_rects(area, reserve);
+            let parts = page_header_rects(area, reserve, true);
             assert_eq!(
-                Monitor::default().header_git_rect(area, reserve == 4),
-                tabs[1]
+                Monitor {
+                    page: config::PulseStartPage::Git,
+                    ..Default::default()
+                }
+                .header_switch_rect(area, reserve == 4),
+                parts[1]
             );
-            assert!(text.contains("TOKEN"));
-            assert!(!text.contains("TOKEN(g)"));
+            assert!(text.contains("GIT") && text.contains("[Token(g)]"));
             let click = |column| {
                 Event::Mouse(MouseEvent {
                     kind: MouseEventKind::Down(MouseButton::Left),
@@ -3222,9 +3225,10 @@ mod tests {
                     modifiers: KeyModifiers::NONE,
                 })
             };
-            assert!(pane.input(&click(tabs[1].x)));
+            assert!(pane.input(&click(parts[0].x)));
             assert!(pane.diff.is_some());
-            assert!(!pane.input(&click(tabs[0].x)));
+            assert!(!pane.input(&click(parts[1].x)));
+            assert!(!pane.input(&click(parts[1].right() - 1)));
             assert!(pane.diff.is_some());
             assert!(
                 !pane
@@ -3233,8 +3237,21 @@ mod tests {
                     .any(|c| c.key.code == KeyCode::Char('g'))
             );
             pane.modal = Some(Modal::Message("Details".into()));
-            assert!(pane.input(&click(tabs[0].x)));
+            assert!(pane.input(&click(parts[1].x)));
             assert!(pane.modal.is_some());
+            assert!(pane.key(key(KeyCode::Char('g'))));
+            assert!(pane.modal.is_some());
+            let mut monitor = Monitor {
+                page: config::PulseStartPage::Git,
+                git: pane,
+                ..Default::default()
+            };
+            assert!(!monitor.workspace_shortcut(key(KeyCode::Char('g'))));
+            assert_eq!(monitor.page, config::PulseStartPage::Git);
+            monitor.git.modal = None;
+            monitor.git.busy = true;
+            assert!(!monitor.workspace_shortcut(key(KeyCode::Char('g'))));
+            assert_eq!(monitor.page, config::PulseStartPage::Git);
         }
     }
     fn click_footer(pane: &mut GitPane, navigation: bool, index: usize) {

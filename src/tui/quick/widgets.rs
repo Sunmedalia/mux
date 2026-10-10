@@ -545,15 +545,33 @@ pub(super) fn buttons(area: Rect) -> Vec<Rect> {
         ))
         .to_vec()
 }
-pub(super) fn page_tab_rects(area: Rect, reserve: u16) -> [Rect; 2] {
+fn page_header_labels(available: u16, git: bool) -> (&'static str, &'static str, u16, u16) {
+    let title = if git { "▎ GIT" } else { "▎ TOKEN" };
+    let plain = if git { "GIT" } else { "TOKEN" };
+    let short = if git { "GIT" } else { "TOK" };
+    let initial = if git { "G" } else { "T" };
+    let button = if git { "[Token(g)]" } else { "[Git(g)]" };
+    let compact_button = if git { "[Token]" } else { "[Git]" };
+    let tiny_button = if git { "[T]" } else { "[G]" };
+    match available {
+        19.. => (title, button, 7, 2),
+        16.. => (title, button, title.width() as u16, 1),
+        14.. => (plain, button, plain.width() as u16, 1),
+        11.. => (plain, compact_button, plain.width() as u16, 1),
+        7.. => (short, tiny_button, 3, 1),
+        5.. => (initial, tiny_button, 1, 1),
+        4 => (initial, tiny_button, 1, 0),
+        2.. => (initial, if git { "T" } else { "G" }, 1, 0),
+        _ => (initial, "", available, 0),
+    }
+}
+
+pub(super) fn page_header_rects(area: Rect, reserve: u16, git: bool) -> [Rect; 2] {
     let available = area.width.saturating_sub(reserve);
-    let gap = u16::from(available > 1);
-    let content = available.saturating_sub(gap);
-    let token = content.div_ceil(2).min(10);
-    let git = content.saturating_sub(token).min(8);
+    let (_, button, title_width, gap) = page_header_labels(available, git);
     [
-        Rect::new(area.x, area.y, token, 1),
-        Rect::new(area.x + token + gap, area.y, git, 1),
+        Rect::new(area.x, area.y, title_width, 1),
+        Rect::new(area.x + title_width + gap, area.y, button.width() as u16, 1),
     ]
 }
 pub(super) fn pulse_header_area(screen: Rect) -> (Rect, u16) {
@@ -567,54 +585,40 @@ pub(super) fn pulse_header_area(screen: Rect) -> (Rect, u16) {
         if mini { 4 } else { 9 },
     )
 }
-pub(super) fn draw_page_tabs(
+pub(super) fn draw_page_header(
     frame: &mut ratatui::Frame,
     area: Rect,
     reserve: u16,
     git: bool,
     switchable: bool,
 ) {
-    let tabs = page_tab_rects(area, reserve);
-    if tabs[1].x > tabs[0].right() {
-        frame.render_widget(
-            Paragraph::new("│").style(Style::default().fg(SOFT).bg(RAIL)),
-            Rect::new(tabs[0].right(), area.y, 1, 1),
-        );
-    }
-    for (i, rect) in tabs.into_iter().enumerate() {
-        let selected = (i == 1) == git;
-        let label = match (i, selected) {
-            (0, true) => "● TOKEN",
-            (0, false) => "○ TOKEN",
-            (1, true) => "● GIT",
-            _ => "○ GIT",
-        };
-        let compact = if i == 0 { "TOK" } else { "GIT" };
-        frame.render_widget(
-            Paragraph::new(clipped(
-                if label.width() <= usize::from(rect.width) {
-                    label
-                } else {
-                    compact
-                },
-                usize::from(rect.width),
-            ))
-            .alignment(Alignment::Center)
-            .style(
-                Style::default()
-                    .fg(if selected { BG } else { SOFT })
-                    .bg(if selected { BLUE } else { RAIL })
-                    .add_modifier(if selected {
-                        Modifier::BOLD
-                    } else if !switchable {
-                        Modifier::DIM
-                    } else {
-                        Modifier::empty()
-                    }),
-            ),
-            rect,
-        );
-    }
+    let [title_rect, button_rect] = page_header_rects(area, reserve, git);
+    let (title, button, _, _) = page_header_labels(area.width.saturating_sub(reserve), git);
+    let title = if let Some(label) = title.strip_prefix("▎ ") {
+        Line::from(vec![
+            Span::styled("▎ ", Style::default().fg(BLUE)),
+            Span::styled(label, Style::default().fg(INK).add_modifier(Modifier::BOLD)),
+        ])
+    } else {
+        Line::from(Span::styled(
+            title,
+            Style::default().fg(INK).add_modifier(Modifier::BOLD),
+        ))
+    };
+    frame.render_widget(
+        Paragraph::new(title).style(Style::default().bg(BG)),
+        title_rect,
+    );
+    frame.render_widget(
+        Paragraph::new(button).style(Style::default().fg(SOFT).bg(BG).add_modifier(
+            if switchable {
+                Modifier::empty()
+            } else {
+                Modifier::DIM
+            },
+        )),
+        button_rect,
+    );
 }
 pub(super) fn content_body(inner: Rect) -> Rect {
     Rect::new(

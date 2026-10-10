@@ -364,16 +364,7 @@ pub(super) fn run(paths: AppPaths) -> Result<()> {
                         match m.kind {
                             MouseEventKind::Down(MouseButton::Left)
                                 if contains(
-                                    page_tab_rects(area, if mini { 4 } else { 9 })[0],
-                                    m.column,
-                                    m.row,
-                                ) =>
-                            {
-                                Some(KeyCode::Char('T'))
-                            }
-                            MouseEventKind::Down(MouseButton::Left)
-                                if contains(
-                                    monitor.header_git_rect(area, mini),
+                                    monitor.header_switch_rect(area, mini),
                                     m.column,
                                     m.row,
                                 ) =>
@@ -452,6 +443,9 @@ pub(super) fn run(paths: AppPaths) -> Result<()> {
             _ => None,
         };
         if let Some(key) = key {
+            if monitor.workspace_shortcut(key) {
+                continue;
+            }
             match key.code {
                 KeyCode::Char('q') => break,
                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
@@ -463,9 +457,6 @@ pub(super) fn run(paths: AppPaths) -> Result<()> {
                         }
                         Err(error) => monitor.notice = Some(format!("! {error}")),
                     }
-                }
-                KeyCode::Char('g') => {
-                    monitor.select_workspace(true);
                 }
                 KeyCode::Char('T') => {
                     monitor.select_workspace(false);
@@ -1503,7 +1494,7 @@ mod tests {
             let top: String = (0..width)
                 .map(|x| terminal.backend().buffer()[(x, 0)].symbol())
                 .collect();
-            assert!(top.contains("TOKEN") && top.contains("GIT"));
+            assert!(top.contains("TOKEN") && top.contains("[Git(g)]"));
             assert!(!top.contains("Mux"));
         }
     }
@@ -1721,7 +1712,7 @@ mod tests {
         }
     }
     #[test]
-    fn token_header_git_button_is_visible_and_removed_from_footer() {
+    fn token_header_title_is_prominent_and_git_switch_is_only_in_header() {
         for (width, height) in [(20, 10), (32, 12), (48, 30), (100, 40)] {
             let mut monitor = Monitor::default();
             let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
@@ -1732,9 +1723,22 @@ mod tests {
                     .collect::<String>()
             };
             assert!(row(0).contains("TOKEN"));
-            assert!(row(0).contains("GIT"));
-            assert_eq!(row(0).matches('●').count(), 1);
-            assert!(!row(0).contains("(g)"));
+            assert!(row(0).contains("[Git(g)]"));
+            assert!(!row(0).contains('●') && !row(0).contains('○'));
+            let (header, reserve) = pulse_header_area(Rect::new(0, 0, width, height));
+            let parts = page_header_rects(header, reserve, false);
+            for x in parts[0].x..parts[0].right() {
+                assert_eq!(terminal.backend().buffer()[(x, 0)].bg, BG);
+            }
+            let title_cell = &terminal.backend().buffer()[(parts[0].x + 2, 0)];
+            assert!(title_cell.modifier.contains(Modifier::BOLD));
+            assert_eq!(title_cell.fg, INK);
+            for x in parts[1].x..parts[1].right() {
+                let cell = &terminal.backend().buffer()[(x, 0)];
+                assert_eq!(cell.fg, SOFT);
+                assert_eq!(cell.bg, BG);
+                assert!(!cell.modifier.contains(Modifier::BOLD));
+            }
             assert!(!row(height - 1).contains("GIT"));
             let mini = width < 32 || height < 12;
             let area = if mini {
@@ -1742,12 +1746,12 @@ mod tests {
             } else {
                 Rect::new(0, 0, width, height).inner(Margin::new(2, 0))
             };
-            let rect = monitor.header_git_rect(area, mini);
+            let rect = monitor.header_switch_rect(area, mini);
             assert!(rect.right() <= area.right());
             let label = (rect.x..rect.right())
                 .map(|x| terminal.backend().buffer()[(x, 0)].symbol())
                 .collect::<String>();
-            assert!(label.contains("GIT"));
+            assert_eq!(label, "[Git(g)]");
             assert_eq!(buttons(area).len(), 5);
         }
     }
@@ -1777,6 +1781,20 @@ mod tests {
         assert_eq!(monitor.scroll, 17);
         assert_eq!(monitor.client, 1);
         assert!(monitor.sessions_sort_tokens);
+        for _ in 0..2 {
+            assert!(
+                monitor.workspace_shortcut(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE))
+            );
+            assert_eq!(monitor.page, config::PulseStartPage::Git);
+            assert!(
+                monitor.workspace_shortcut(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE))
+            );
+            assert_eq!(monitor.page, config::PulseStartPage::Sessions);
+            assert_eq!(monitor.scroll, 17);
+        }
+        assert!(
+            !monitor.workspace_shortcut(KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL))
+        );
         assert!(!monitor.workspace_shortcut(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE)));
         assert_eq!(monitor.page, config::PulseStartPage::Sessions);
         let mut from_git = Monitor::default();
