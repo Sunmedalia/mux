@@ -480,7 +480,7 @@ pub(super) fn gateway_cache_meter(t: &Totals, unknown: bool, width: u16) -> Vec<
     vec![Line::from(spans)]
 }
 pub(super) fn buttons(area: Rect) -> Vec<Rect> {
-    let constraints = vec![Constraint::Ratio(1, 6); 6];
+    let constraints = vec![Constraint::Ratio(1, 5); 5];
     Layout::horizontal(constraints)
         .split(Rect::new(
             area.x,
@@ -489,6 +489,77 @@ pub(super) fn buttons(area: Rect) -> Vec<Rect> {
             1,
         ))
         .to_vec()
+}
+pub(super) fn page_tab_rects(area: Rect, reserve: u16) -> [Rect; 2] {
+    let available = area.width.saturating_sub(reserve);
+    let gap = u16::from(available > 1);
+    let content = available.saturating_sub(gap);
+    let token = content.div_ceil(2).min(10);
+    let git = content.saturating_sub(token).min(8);
+    [
+        Rect::new(area.x, area.y, token, 1),
+        Rect::new(area.x + token + gap, area.y, git, 1),
+    ]
+}
+pub(super) fn pulse_header_area(screen: Rect) -> (Rect, u16) {
+    let mini = screen.width < 32 || screen.height < 12;
+    (
+        if mini {
+            screen
+        } else {
+            screen.inner(Margin::new(2, 0))
+        },
+        if mini { 4 } else { 9 },
+    )
+}
+pub(super) fn draw_page_tabs(
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    reserve: u16,
+    git: bool,
+    switchable: bool,
+) {
+    let tabs = page_tab_rects(area, reserve);
+    if tabs[1].x > tabs[0].right() {
+        frame.render_widget(
+            Paragraph::new("│").style(Style::default().fg(SOFT).bg(RAIL)),
+            Rect::new(tabs[0].right(), area.y, 1, 1),
+        );
+    }
+    for (i, rect) in tabs.into_iter().enumerate() {
+        let selected = (i == 1) == git;
+        let label = match (i, selected) {
+            (0, true) => "● TOKEN",
+            (0, false) => "○ TOKEN",
+            (1, true) => "● GIT",
+            _ => "○ GIT",
+        };
+        let compact = if i == 0 { "TOK" } else { "GIT" };
+        frame.render_widget(
+            Paragraph::new(clipped(
+                if label.width() <= usize::from(rect.width) {
+                    label
+                } else {
+                    compact
+                },
+                usize::from(rect.width),
+            ))
+            .alignment(Alignment::Center)
+            .style(
+                Style::default()
+                    .fg(if selected { BG } else { SOFT })
+                    .bg(if selected { BLUE } else { RAIL })
+                    .add_modifier(if selected {
+                        Modifier::BOLD
+                    } else if !switchable {
+                        Modifier::DIM
+                    } else {
+                        Modifier::empty()
+                    }),
+            ),
+            rect,
+        );
+    }
 }
 pub(super) fn content_body(inner: Rect) -> Rect {
     Rect::new(
@@ -507,7 +578,7 @@ pub(super) fn mini_body(area: Rect) -> Rect {
     )
 }
 pub(super) fn mini_buttons(area: Rect) -> Vec<Rect> {
-    Layout::horizontal([Constraint::Ratio(1, 6); 6])
+    Layout::horizontal([Constraint::Ratio(1, 5); 5])
         .split(Rect::new(
             area.x,
             area.bottom().saturating_sub(1),

@@ -49,7 +49,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt -- --check
       - run: cargo clippy --locked --all-targets --all-features -- -D warnings
-      - run: cargo test --locked --all-targets --all-features
+      - name: Run all Rust regressions
+        run: |
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            # Independent SQLite WAL tests can deadlock while closing connections
+            # in parallel on macOS. Each test still exercises its own concurrency.
+            cargo test --locked --all-targets --all-features -- --test-threads=1
+          else
+            cargo test --locked --all-targets --all-features
+          fi
         timeout-minutes: 5
 
   msrv:
@@ -157,13 +165,32 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v5
+      - name: Validate release version and notes
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import pathlib
+          import tomllib
+          tag = os.environ["RELEASE_TAG"]
+          version = tag.removeprefix("v")
+          package = tomllib.loads(pathlib.Path("Cargo.toml").read_text())["package"]["version"]
+          plugin = tomllib.loads(pathlib.Path("herdr-plugin.toml").read_text())["version"]
+          assert tag == f"v{version}" and package == plugin == version, "Release versions must match"
+          notes = pathlib.Path("docs/releases") / f"{tag}.md"
+          assert notes.is_file() and notes.read_text().strip(), "Detailed release notes are required"
+          PY
       - uses: actions/download-artifact@v4
         with:
           path: dist
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          generate_release_notes: true
+          name: Mux ${{ github.ref_name }}
+          body_path: docs/releases/${{ github.ref_name }}.md
+          generate_release_notes: false
           files: |
             dist/**/*.tar.gz
             dist/**/*.tar.gz.sha256

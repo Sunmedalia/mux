@@ -441,8 +441,12 @@ pub(super) fn help_commands(section: HelpSection) -> &'static [(&'static str, &'
             ("Tab / 1–4", "Cycle / select agent"),
             ("e", "Open editor in a new tab"),
             (
-                "g",
-                "Git sidebar / return to usage; follows focused terminal directory",
+                "Alt+1 / Alt+2 · T / g",
+                "Select Token / Git; retain each page's context",
+            ),
+            (
+                "Git L",
+                "Commit history; / search messages, Enter details, comma/period pages",
             ),
             ("Git Enter / [ ]", "Open Diff / select a difference block"),
             (
@@ -453,9 +457,10 @@ pub(super) fn help_commands(section: HelpSection) -> &'static [(&'static str, &'
                 "Git w",
                 "Diff: toggle wrapping; off enables horizontal scrolling",
             ),
+            ("Git s", "Stage selected whole file; a stages all changes"),
             (
                 "Git a / u / d",
-                "Stage / unstage / discard file or selected hunk",
+                "Stage all / unstage selected change / discard selected change",
             ),
             (
                 "Git n / b / o",

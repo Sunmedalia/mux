@@ -6,7 +6,7 @@
 
 ## 解压运行
 
-从 [v0.1.19 Release](https://github.com/Sunmedalia/mux/releases/tag/v0.1.19) 下载 `mux-windows-x86_64.zip` 及 `.zip.sha256`。历史 Release 的程序与文件名仍属于旧版本；请使用 v0.1.19 或更新版本。
+从 [v0.1.20 Release](https://github.com/Sunmedalia/mux/releases/tag/v0.1.20) 下载 `mux-windows-x86_64.zip` 及 `.zip.sha256`。历史 Release 的程序与文件名仍属于旧版本；请使用 v0.1.19 或更新版本。
 
 在 PowerShell 中，解压下载的归档并运行：
 

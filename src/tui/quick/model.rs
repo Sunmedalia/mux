@@ -9,6 +9,7 @@ pub(super) struct Monitor {
     pub(super) sessions: crate::sessions::Snapshot,
     pub(super) sessions_refreshed: Option<Instant>,
     pub(super) page: config::PulseStartPage,
+    pub(super) token_page: config::PulseStartPage,
     pub(super) git: git::GitPane,
     pub(super) visual_mode: bool,
     pub(super) preferences: config::UiPreferences,
@@ -38,6 +39,34 @@ impl Monitor {
 
     pub(super) fn apply_start_page(&mut self) {
         self.page = self.preferences.pulse_start_page;
+        if self.page != config::PulseStartPage::Git {
+            self.token_page = self.page;
+        }
+    }
+
+    pub(super) fn select_workspace(&mut self, git: bool) {
+        if git == (self.page == config::PulseStartPage::Git) {
+            return;
+        }
+        if git {
+            self.token_page = self.page;
+            self.page = config::PulseStartPage::Git;
+        } else {
+            self.page = self.token_page;
+        }
+    }
+
+    pub(super) fn workspace_shortcut(&mut self, key: KeyEvent) -> bool {
+        if key.kind != event::KeyEventKind::Press
+            || key.modifiers != KeyModifiers::ALT
+            || !matches!(key.code, KeyCode::Char('1' | '2'))
+            || self.picker.is_some()
+            || (self.page == config::PulseStartPage::Git && !self.git.can_switch_workspace())
+        {
+            return false;
+        }
+        self.select_workspace(key.code == KeyCode::Char('2'));
+        true
     }
 
     pub(super) fn refresh_preferences(&mut self, preferences: config::UiPreferences) -> bool {

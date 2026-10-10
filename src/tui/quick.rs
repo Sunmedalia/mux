@@ -205,6 +205,11 @@ pub(super) fn run(paths: AppPaths) -> Result<()> {
         }
         redraw = true;
         let input = event::read()?;
+        if let Event::Key(key) = &input
+            && monitor.workspace_shortcut(*key)
+        {
+            continue;
+        }
         if monitor.page == config::PulseStartPage::Git {
             if monitor.git.input(&input) {
                 continue;
@@ -218,8 +223,7 @@ pub(super) fn run(paths: AppPaths) -> Result<()> {
                     break;
                 }
                 _ => {
-                    monitor.page = config::PulseStartPage::Home;
-                    monitor.scroll = 0;
+                    monitor.select_workspace(false);
                     continue;
                 }
             }
@@ -359,6 +363,24 @@ pub(super) fn run(paths: AppPaths) -> Result<()> {
                     } else {
                         match m.kind {
                             MouseEventKind::Down(MouseButton::Left)
+                                if contains(
+                                    page_tab_rects(area, if mini { 4 } else { 9 })[0],
+                                    m.column,
+                                    m.row,
+                                ) =>
+                            {
+                                Some(KeyCode::Char('T'))
+                            }
+                            MouseEventKind::Down(MouseButton::Left)
+                                if contains(
+                                    monitor.header_git_rect(area, mini),
+                                    m.column,
+                                    m.row,
+                                ) =>
+                            {
+                                Some(KeyCode::Char('g'))
+                            }
+                            MouseEventKind::Down(MouseButton::Left)
                                 if m.row == 0
                                     && (!mini || area.width >= 10)
                                     && m.column
@@ -406,7 +428,6 @@ pub(super) fn run(paths: AppPaths) -> Result<()> {
                             .map(|i| {
                                 [
                                     KeyCode::Char('e'),
-                                    KeyCode::Char('g'),
                                     KeyCode::Char(
                                         if monitor.page == config::PulseStartPage::Sessions {
                                             't'
@@ -447,9 +468,10 @@ pub(super) fn run(paths: AppPaths) -> Result<()> {
                     }
                 }
                 KeyCode::Char('g') => {
-                    monitor.page = config::PulseStartPage::Git;
-                    monitor.help = false;
-                    monitor.scroll = 0;
+                    monitor.select_workspace(true);
+                }
+                KeyCode::Char('T') => {
+                    monitor.select_workspace(false);
                 }
                 KeyCode::Char('e') => {
                     monitor.notice = Some(match open_editor() {
@@ -1475,7 +1497,7 @@ mod tests {
             let top: String = (0..width)
                 .map(|x| terminal.backend().buffer()[(x, 0)].symbol())
                 .collect();
-            assert!(top.contains("SESSIONS"));
+            assert!(top.contains("TOKEN") && top.contains("GIT"));
             assert!(!top.contains("Mux"));
         }
     }
@@ -1680,7 +1702,7 @@ mod tests {
                 .iter()
                 .map(|c| c.symbol())
                 .collect();
-            assert!(text.contains("GATEWAY / TODAY"));
+            assert!(text.contains("TOKEN"));
             assert!(text.contains("(e)"));
             assert!(text.contains("(c)"));
             assert!(text.contains("(r)"));
@@ -1691,6 +1713,71 @@ mod tests {
             terminal.draw(|f| m.draw(f)).unwrap();
             assert!(m.scroll <= m.limit);
         }
+    }
+    #[test]
+    fn token_header_git_button_is_visible_and_removed_from_footer() {
+        for (width, height) in [(20, 10), (32, 12), (48, 30), (100, 40)] {
+            let mut monitor = Monitor::default();
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal.draw(|f| monitor.draw(f)).unwrap();
+            let row = |y| {
+                (0..width)
+                    .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                    .collect::<String>()
+            };
+            assert!(row(0).contains("TOKEN"));
+            assert!(row(0).contains("GIT"));
+            assert_eq!(row(0).matches('●').count(), 1);
+            assert!(!row(0).contains("(g)"));
+            assert!(!row(height - 1).contains("GIT"));
+            let mini = width < 32 || height < 12;
+            let area = if mini {
+                Rect::new(0, 0, width, height)
+            } else {
+                Rect::new(0, 0, width, height).inner(Margin::new(2, 0))
+            };
+            let rect = monitor.header_git_rect(area, mini);
+            assert!(rect.right() <= area.right());
+            let label = (rect.x..rect.right())
+                .map(|x| terminal.backend().buffer()[(x, 0)].symbol())
+                .collect::<String>();
+            assert!(label.contains("GIT"));
+            assert_eq!(buttons(area).len(), 5);
+        }
+    }
+    #[test]
+    fn workspace_selection_is_idempotent_and_restores_token_context() {
+        let mut monitor = Monitor {
+            page: config::PulseStartPage::Sessions,
+            scroll: 17,
+            client: 1,
+            sessions_sort_tokens: true,
+            ..Default::default()
+        };
+        monitor.select_workspace(false);
+        assert_eq!(monitor.page, config::PulseStartPage::Sessions);
+        for _ in 0..2 {
+            assert!(
+                monitor.workspace_shortcut(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::ALT))
+            );
+            assert_eq!(monitor.page, config::PulseStartPage::Git);
+        }
+        for _ in 0..2 {
+            assert!(
+                monitor.workspace_shortcut(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::ALT))
+            );
+            assert_eq!(monitor.page, config::PulseStartPage::Sessions);
+        }
+        assert_eq!(monitor.scroll, 17);
+        assert_eq!(monitor.client, 1);
+        assert!(monitor.sessions_sort_tokens);
+        assert!(!monitor.workspace_shortcut(KeyEvent::new(KeyCode::Char('2'), KeyModifiers::NONE)));
+        assert_eq!(monitor.page, config::PulseStartPage::Sessions);
+        let mut from_git = Monitor::default();
+        from_git.preferences.pulse_start_page = config::PulseStartPage::Git;
+        from_git.apply_start_page();
+        from_git.select_workspace(false);
+        assert_eq!(from_git.page, config::PulseStartPage::Home);
     }
     #[test]
     fn health_needs_samples_and_excludes_pending() {

@@ -1,6 +1,30 @@
 use super::*;
 
 impl Monitor {
+    pub(super) fn header_git_rect(&self, area: Rect, mini: bool) -> Rect {
+        page_tab_rects(area, if mini { 4 } else { 9 })[1]
+    }
+    fn draw_token_header(&self, f: &mut ratatui::Frame, area: Rect, mini: bool) {
+        let reserve = if mini { 4 } else { 9 };
+        draw_page_tabs(f, area, reserve, false, self.picker.is_none());
+        let suffix = if self.help {
+            "HELP"
+        } else if self.page == config::PulseStartPage::Sessions {
+            "SESSIONS"
+        } else if self.page == config::PulseStartPage::Charts {
+            "CHARTS"
+        } else {
+            ""
+        };
+        let x = page_tab_rects(area, reserve)[1].right().saturating_add(2);
+        let width = area.right().saturating_sub(reserve).saturating_sub(x);
+        if suffix.width() <= usize::from(width) {
+            f.render_widget(
+                Paragraph::new(suffix).style(Style::default().fg(SOFT)),
+                Rect::new(x, area.y, width, 1),
+            );
+        }
+    }
     pub(super) fn account_content(&self, width: u16) -> Vec<Line<'static>> {
         let (title, info) = match self.client {
             1 => ("CODEX ACCOUNT", &self.accounts.codex),
@@ -681,20 +705,7 @@ impl Monitor {
             self.scroll = 0;
             return;
         }
-        let title = if self.help {
-            "HELP"
-        } else if self.page == config::PulseStartPage::Sessions {
-            "SESSIONS"
-        } else if self.page == config::PulseStartPage::Charts {
-            "CHARTS"
-        } else {
-            "PULSE"
-        };
-        f.render_widget(
-            Paragraph::new(format!("◈ {title}"))
-                .style(Style::default().fg(BLUE).add_modifier(Modifier::BOLD)),
-            Rect::new(area.x, area.y, area.width.saturating_sub(5), 1),
-        );
+        self.draw_token_header(f, area, true);
         if area.width >= 10 {
             f.render_widget(
                 Paragraph::new("v ?").style(Style::default().fg(SOFT)),
@@ -765,7 +776,6 @@ impl Monitor {
         }
         for (label, rect) in [
             "e",
-            "g",
             if self.page == config::PulseStartPage::Sessions {
                 "t"
             } else {
@@ -1559,7 +1569,7 @@ impl Monitor {
                 line("Visual I/O: blue input,", SOFT),
                 line("gold output; bars show share.", SOFT),
                 line("s: Usage / Sessions", BLUE),
-                line("g: Git sidebar · ?: Git help", BLUE),
+                line("Alt+1/2: Token/Git · g: Git · T: Token", BLUE),
                 line("t: recent / tokens sort", BLUE),
                 line("? / Esc to return", BLUE),
                 line("v: text / visual view", BLUE),
@@ -1719,24 +1729,7 @@ impl Monitor {
         }
         self.roomy_visual = area.height >= 32;
         let inner = area.inner(Margin::new(2, 0));
-        let title = if self.help {
-            "◈ HELP"
-        } else if self.page == config::PulseStartPage::Sessions {
-            "◈ SESSIONS / ALL TIME"
-        } else if self.page == config::PulseStartPage::Charts {
-            "◈ CHARTS / TODAY"
-        } else {
-            if self.client == 2 {
-                "◈ GROK / USAGE"
-            } else {
-                "◈ GATEWAY / TODAY"
-            }
-        };
-        f.render_widget(
-            Paragraph::new(clipped(title, usize::from(inner.width.saturating_sub(10))))
-                .style(Style::default().fg(BLUE).add_modifier(Modifier::BOLD)),
-            Rect::new(inner.x, inner.y, inner.width.saturating_sub(9), 1),
-        );
+        self.draw_token_header(f, inner, false);
         f.render_widget(
             Paragraph::new(if self.visual_mode { "T(v)" } else { "V(v)" })
                 .style(Style::default().fg(BLUE).add_modifier(Modifier::BOLD)),
@@ -1840,7 +1833,6 @@ impl Monitor {
             } else {
                 "↗(e)"
             },
-            "Git(g)",
             if inner.width < 44 {
                 if self.page == config::PulseStartPage::Sessions {
                     "T(t)"

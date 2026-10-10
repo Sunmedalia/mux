@@ -58,6 +58,23 @@ pub struct Snapshot {
     pub head: Option<String>,
 }
 #[derive(Clone, Debug)]
+pub struct Commit {
+    pub id: String,
+    pub short: String,
+    pub date: String,
+    pub author: String,
+    pub subject: String,
+    pub refs: String,
+}
+pub const LOG_PAGE_SIZE: usize = 50;
+#[derive(Clone, Debug)]
+pub struct History {
+    pub commits: Vec<Commit>,
+    pub page: usize,
+    pub has_more: bool,
+    pub query: String,
+}
+#[derive(Clone, Debug)]
 pub struct Hunk {
     pub start: usize,
     pub end: usize,
@@ -586,6 +603,74 @@ pub fn diff(root: &Path, file: &File) -> Result<Diff> {
 pub fn index_stamp(root: &Path) -> Result<Vec<u8>> {
     git(root, &["ls-files", "--stage", "-z"])
 }
+pub fn history(root: &Path, page: usize, query: &str) -> Result<History> {
+    let mut history = History {
+        commits: vec![],
+        page,
+        has_more: false,
+        query: query.into(),
+    };
+    if snapshot(root)?.head.is_none() {
+        return Ok(history);
+    }
+    let skip = page
+        .checked_mul(LOG_PAGE_SIZE)
+        .context("History page is too large")?;
+    let mut parts = args(&[
+        "log",
+        "-z",
+        "--date-order",
+        "--decorate=short",
+        "--format=%H%x00%h%x00%aI%x00%an%x00%s%x00%D",
+        &format!("--skip={skip}"),
+        &format!("--max-count={}", LOG_PAGE_SIZE + 1),
+    ]);
+    if !query.is_empty() {
+        parts.extend(args(&["--fixed-strings", "--regexp-ignore-case"]));
+        parts.push(format!("--grep={query}").into());
+    }
+    parts.extend(args(&["HEAD", "--"]));
+    let output = run(root, parts, None)?;
+    for fields in output
+        .split(|b| *b == 0)
+        .collect::<Vec<_>>()
+        .chunks_exact(6)
+    {
+        let value = |i| String::from_utf8_lossy(fields[i]).into_owned();
+        history.commits.push(Commit {
+            id: value(0),
+            short: value(1),
+            date: value(2),
+            author: value(3),
+            subject: value(4),
+            refs: value(5),
+        });
+    }
+    history.has_more = history.commits.len() > LOG_PAGE_SIZE;
+    history.commits.truncate(LOG_PAGE_SIZE);
+    Ok(history)
+}
+pub fn show_commit(root: &Path, id: &str) -> Result<String> {
+    ensure!(
+        matches!(id.len(), 40 | 64) && id.bytes().all(|b| b.is_ascii_hexdigit()),
+        "Invalid commit id"
+    );
+    text(
+        root,
+        &[
+            "show",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--format=fuller",
+            "--stat",
+            "--patch",
+            "--find-renames",
+            id,
+            "--",
+        ],
+    )
+}
 pub fn branches(root: &Path) -> Result<Vec<String>> {
     Ok(text(
         root,
@@ -648,6 +733,7 @@ pub fn perform(root: &Path, action: Action) -> Result<String> {
         )?,
         Action::StageAll => {
             git(root, &["add", "-A", "--", "."])?;
+            output = "Staged all changes".into();
         }
         Action::UnstageAll => {
             if current.head.is_some() {
@@ -845,6 +931,91 @@ mod tests {
             .into_iter()
             .find(|f| f.group == group)
             .unwrap()
+    }
+
+    #[test]
+    fn stage_all_includes_modified_deleted_and_new_files() {
+        let dir = repo();
+        let root = dir.path();
+        write(root, "modified", "before\n");
+        write(root, "deleted", "before\n");
+        commit(root);
+        write(root, "modified", "after\n");
+        std::fs::remove_file(root.join("deleted")).unwrap();
+        std::fs::create_dir(root.join("sub")).unwrap();
+        write(root, "sub/new", "new\n");
+        assert_eq!(
+            perform(root, Action::StageAll).unwrap(),
+            "Staged all changes"
+        );
+        let s = snapshot(root).unwrap();
+        assert_eq!(s.files.len(), 3);
+        assert!(s.files.iter().all(|file| file.group == Group::Index));
+        assert!(
+            s.files
+                .iter()
+                .any(|f| f.path == Path::new("deleted") && f.x == b'D')
+        );
+    }
+
+    #[test]
+    fn history_pages_and_details_preserve_worktree_and_index() {
+        let dir = repo();
+        let root = dir.path();
+        assert!(history(root, 0, "").unwrap().commits.is_empty());
+        write(root, "tracked", "initial\n");
+        commit(root);
+        for i in 0..LOG_PAGE_SIZE {
+            git(
+                root,
+                &[
+                    "commit",
+                    "--allow-empty",
+                    "-m",
+                    &format!("history {i} 中文"),
+                    "-m",
+                    "Full commit body [literal]",
+                ],
+            )
+            .unwrap();
+        }
+        write(root, "tracked", "unstaged\n");
+        let index = index_stamp(root).unwrap();
+        let first = history(root, 0, "").unwrap();
+        assert_eq!(first.commits.len(), LOG_PAGE_SIZE);
+        assert!(first.has_more);
+        assert_eq!(first.commits[0].subject, "history 49 中文");
+        assert_eq!(first.commits[0].author, "Mux Test");
+        assert!(first.commits[0].refs.contains("HEAD -> main"));
+        assert!(first.commits[1].refs.is_empty());
+        let second = history(root, 1, "").unwrap();
+        assert_eq!(second.commits.len(), 1);
+        assert!(!second.has_more);
+        let filtered = history(root, 0, "fixture").unwrap();
+        assert_eq!(filtered.commits.len(), 1);
+        assert_eq!(filtered.commits[0].id, second.commits[0].id);
+        assert_eq!(filtered.query, "fixture");
+        let body = history(root, 0, "full COMMIT body [literal]").unwrap();
+        assert_eq!(body.commits.len(), LOG_PAGE_SIZE);
+        assert!(!body.has_more);
+        assert!(history(root, 0, "--all").unwrap().commits.is_empty());
+        assert!(
+            history(root, 0, "no such message")
+                .unwrap()
+                .commits
+                .is_empty()
+        );
+        let details = show_commit(root, &first.commits[0].id).unwrap();
+        assert!(details.contains("Full commit body"));
+        let initial = show_commit(root, &second.commits[0].id).unwrap();
+        assert!(initial.contains("diff --git a/tracked b/tracked"));
+        assert!(initial.contains("+initial"));
+        assert!(show_commit(root, "--all").is_err());
+        assert_eq!(index_stamp(root).unwrap(), index);
+        assert_eq!(
+            std::fs::read_to_string(root.join("tracked")).unwrap(),
+            "unstaged\n"
+        );
     }
 
     #[test]

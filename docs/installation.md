@@ -33,7 +33,7 @@ Herdr 模式先检查 `herdr` 命令，不存在就提示“没有 Herdr”并�
 
 ### 下载 Release
 
-v0.1.19 提供 macOS Apple Silicon、Linux x86_64/ARM64 与 Windows x64 发布包。macOS/Linux 可使用下列命令下载，Windows 安装说明见 [README-Windows.md](../README-Windows.md)。
+v0.1.20 提供 macOS Apple Silicon、Linux x86_64/ARM64 与 Windows x64 发布包。macOS/Linux 可使用下列命令下载，Windows 安装说明见 [README-Windows.md](../README-Windows.md)。
 
 ```sh
 # macOS Apple Silicon
@@ -51,7 +51,7 @@ sudo install mux /usr/local/bin/mux
 
 ### Windows
 
-下载 [v0.1.19 Windows x64 ZIP](https://github.com/Sunmedalia/mux/releases/download/v0.1.19/mux-windows-x86_64.zip) 及旁边的 SHA-256 文件。完整的校验、解压、PowerShell/CMD 示例、自启和更新方法见 [Windows 使用说明](../README-Windows.md)。
+下载 [v0.1.20 Windows x64 ZIP](https://github.com/Sunmedalia/mux/releases/download/v0.1.20/mux-windows-x86_64.zip) 及旁边的 SHA-256 文件。完整的校验、解压、PowerShell/CMD 示例、自启和更新方法见 [Windows 使用说明](../README-Windows.md)。
 
 配置默认位于 `%APPDATA%\mux\config.toml`，状态与缓存位于 `%LOCALAPPDATA%\mux\state`、`cache`。关闭 TUI 不会停止后台代理；更新前先执行 `mux proxy stop`，移动程序前先卸载旧位置的自启项。
 
