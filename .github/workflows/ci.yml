@@ -50,14 +50,9 @@ jobs:
       - run: cargo fmt -- --check
       - run: cargo clippy --locked --all-targets --all-features -- -D warnings
       - name: Run all Rust regressions
-        run: |
-          if [ "$RUNNER_OS" = "macOS" ]; then
-            # Independent SQLite WAL tests can deadlock while closing connections
-            # in parallel on macOS. Each test still exercises its own concurrency.
-            cargo test --locked --all-targets --all-features -- --test-threads=1
-          else
-            cargo test --locked --all-targets --all-features
-          fi
+        # Independent subprocess/file-lock tests can contend, and SQLite WAL
+        # tests can deadlock on macOS. Tests retain their internal concurrency.
+        run: cargo test --locked --all-targets --all-features -- --test-threads=1
         timeout-minutes: 5
 
   msrv:
@@ -90,7 +85,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo clippy --locked --target x86_64-pc-windows-msvc --all-targets --all-features -- -D warnings
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo test --locked --target x86_64-pc-windows-msvc --all-targets --all-features
+          cargo test --locked --target x86_64-pc-windows-msvc --all-targets --all-features -- --test-threads=1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Generate and exercise a real npm shim
         shell: pwsh

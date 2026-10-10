@@ -7,7 +7,7 @@
 ```sh
 cargo fmt -- --check
 cargo clippy --locked --all-targets --all-features -- -D warnings
-cargo test --locked --all-targets --all-features
+cargo test --locked --all-targets --all-features -- --test-threads=1
 cargo build --locked --release
 
 # 可选：十万/百万条统计记录的查询与无变化刷新基准（使用临时数据库）
@@ -15,6 +15,8 @@ cargo test --locked --bin mux large_ledger_query_benchmark -- --ignored --nocapt
 ```
 
 CI 在 main/dev 分支推送、Pull Request、版本标签推送或手动触发时运行：Ubuntu、macOS 与 Windows 执行检查，Windows 额外验证 Rust 1.88、npm 启动器、MSVC 静态运行库及解压后的 ZIP。版本标签通过跨平台测试、依赖安全审计和 Docker 安全回归后生成 Release。Windows ZIP 附带 SHA-256 校验文件。
+
+独立 Rust 测试按串行调度，避免子进程继承文件锁造成偶发竞争，以及 macOS SQLite WAL 测试并行关闭连接造成超时。每个测试内部的并发请求、读写和冲突检查仍照常执行。
 
 Codex 的自动测试使用隔离 HOME、模拟登录凭据和本地上游，不读取真实账号。可另行安装 Codex CLI 后运行真实进程冒烟测试（无 API 调用费用）：
 
