@@ -634,7 +634,9 @@ pub fn history(root: &Path, page: usize, query: &str) -> Result<History> {
     for fields in output
         .split(|b| *b == 0)
         .collect::<Vec<_>>()
-        .chunks_exact(6)
+        .as_chunks::<6>()
+        .0
+        .iter()
     {
         let value = |i| String::from_utf8_lossy(fields[i]).into_owned();
         history.commits.push(Commit {
