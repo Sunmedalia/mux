@@ -206,10 +206,7 @@ impl Monitor {
         } else {
             short(totals.input + totals.output)
         };
-        let mut out = vec![
-            pair("GATEWAY TOKENS", self.snapshot.today(), width, BLUE),
-            Line::default(),
-        ];
+        let mut out = vec![pair("GATEWAY TOKENS", self.snapshot.today(), width, BLUE)];
         out.extend(if width < 30 {
             mini_token_total(&value, width, BLUE)
         } else {
@@ -873,9 +870,6 @@ impl Monitor {
             return vec![];
         }
         let mut out = vec![section("SESSION / ALL TIME", width)];
-        if self.roomy_visual {
-            out.push(Line::default());
-        }
         let Some(current) = &self.active_session else {
             out.push(line("◌ Waiting for agent session ID", SOFT));
             out.push(line("Open or resume a session in the focused pane", SOFT));
@@ -920,17 +914,11 @@ impl Monitor {
             width,
             SOFT,
         ));
-        if self.roomy_visual {
-            out.push(Line::default());
-        }
         if !s.tokens.known {
             out.push(line("Token usage unavailable in local log", SOFT));
             return out;
         }
         out.extend(token_digits(&short(s.tokens.total()), METRIC));
-        if self.roomy_visual {
-            out.push(Line::default());
-        }
         if s.incomplete {
             out.push(line("+? partial token log", GOLD));
         }
@@ -948,9 +936,6 @@ impl Monitor {
         let m = metrics(&self.snapshot, self.client());
         let t = &m.total;
         let mut out = vec![pair("TOKENS", self.snapshot.today(), width, SOFT)];
-        if self.roomy_visual {
-            out.push(Line::default());
-        }
         if self.refreshed.is_none() {
             out.push(line("◌ Reading gateway usage…", SOFT));
             let active = self.visual_active_content(width);
@@ -967,17 +952,11 @@ impl Monitor {
             short(t.input + t.output)
         };
         out.extend(token_digits(&total, BLUE));
-        if self.roomy_visual {
-            out.push(Line::default());
-        }
         out.push(if unknown {
             line("I/O ░░░░░░░░░░ I ? O ?", SOFT)
         } else {
             compact_token_meter(t.input, t.output, width)
         });
-        if self.roomy_visual {
-            out.push(Line::default());
-        }
         out.push(pair(
             "● Calls / unknown",
             format!("{} / {}", t.calls, t.unknown),
@@ -989,9 +968,6 @@ impl Monitor {
         out.push(line(format!("{} measured streams", t.speed_samples), SOFT));
         out.push(Line::default());
         out.push(section("CALL HEALTH", width));
-        if self.roomy_visual {
-            out.push(Line::default());
-        }
         let health = rate(t);
         out.push(health_meter(t, width));
         out.push(pair(
@@ -1019,9 +995,6 @@ impl Monitor {
         } else {
             section_action("PROVIDERS / TODAY", "[Models m]", width)
         });
-        if self.roomy_visual {
-            out.push(Line::default());
-        }
         let mut entries: Vec<(String, &Totals)> = if self.models {
             m.models
                 .iter()
@@ -1047,10 +1020,7 @@ impl Monitor {
             out.push(line("No tracked requests today", SOFT));
             out.push(line("Waiting for gateway traffic…", SOFT));
         }
-        for (index, (name, totals)) in entries.into_iter().enumerate() {
-            if self.roomy_visual && index > 0 {
-                out.push(Line::default());
-            }
+        for (name, totals) in entries {
             out.push(pair(&name, format!("{} calls", totals.calls), width, INK));
             out.push(pair(
                 &format!("{} tok", token_label(totals)),
@@ -1251,10 +1221,7 @@ impl Monitor {
         } else {
             short(t.input + t.output)
         };
-        out.extend([
-            pair("TOKENS", self.snapshot.today(), width, SOFT),
-            Line::default(),
-        ]);
+        out.extend([pair("TOKENS", self.snapshot.today(), width, SOFT)]);
         out.extend(token_digits(&value, BLUE));
         let input = if unknown {
             "—".into()
@@ -1462,9 +1429,6 @@ impl Monitor {
             out.push(Line::default());
         }
         out.push(section("SESSION HISTORY", width));
-        if self.roomy_visual {
-            out.push(Line::default());
-        }
         out.push(pair(
             "Earlier sessions",
             history_count.to_string(),
@@ -1727,7 +1691,6 @@ impl Monitor {
             self.draw_mini(f, area);
             return;
         }
-        self.roomy_visual = area.height >= 32;
         let inner = area.inner(Margin::new(2, 0));
         self.draw_token_header(f, inner, false);
         f.render_widget(
@@ -1741,7 +1704,7 @@ impl Monitor {
         );
         let tabs = Layout::horizontal([Constraint::Ratio(1, 4); 4]).split(Rect::new(
             inner.x,
-            inner.y + 2,
+            inner.y + 1,
             inner.width,
             1,
         ));
@@ -1825,7 +1788,7 @@ impl Monitor {
                     SOFT
                 },
             )),
-            Rect::new(inner.x, area.bottom() - 3, inner.width, 1),
+            Rect::new(inner.x, area.bottom() - 2, inner.width, 1),
         );
         for (label, rect) in [
             if inner.width >= 44 {

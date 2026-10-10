@@ -1792,11 +1792,7 @@ impl GitPane {
         let Some(snapshot) = &self.snapshot else {
             return String::new();
         };
-        let available = if self.screen.width < 32 || self.screen.height < 16 {
-            width
-        } else {
-            width / 2
-        };
+        let available = width / 2;
         if available < 4 {
             return clipped(&snapshot.branch, usize::from(available));
         }
@@ -1840,20 +1836,17 @@ impl GitPane {
                 Style::default().fg(group_color(group)),
             ));
         }
-        if compact {
-            return vec![
-                line(self.repository_branch_label(width), BLUE),
-                Line::from(summary),
-            ];
-        }
-        let name = snapshot.root.file_name().map_or_else(
-            || service::display_path(&snapshot.root),
-            |name| safe_text(&name.to_string_lossy()),
-        );
         let branch = self.repository_branch_label(width);
-        let mut identity = pair(&name, branch, width, BLUE);
-        identity.spans[0].style = Style::default().fg(INK).add_modifier(Modifier::BOLD);
-        identity.style = Style::default().bg(RAIL);
+        let path = clipped(
+            &service::display_path(&snapshot.root),
+            usize::from(width).saturating_sub(branch.width() + 1),
+        );
+        let mut identity = pair(&path, branch, width, SOFT);
+        identity.spans[0].style = Style::default().fg(INK);
+        identity.spans[2].style = Style::default().fg(SOFT);
+        if compact {
+            return vec![identity, Line::from(summary)];
+        }
         let upstream = snapshot
             .upstream
             .as_ref()
@@ -1862,10 +1855,6 @@ impl GitPane {
             });
         vec![
             identity,
-            line(
-                clipped(&service::display_path(&snapshot.root), usize::from(width)),
-                SOFT,
-            ),
             line(clipped(&upstream, usize::from(width)), SOFT),
             Line::from(summary),
             Line::default(),
@@ -2059,21 +2048,8 @@ impl GitPane {
             let label = self.repository_branch_label(width);
             let button_width = label.width().min(usize::from(width)) as u16;
             if button_width > 0 {
-                let x = if screen.width < 32 || screen.height < 16 {
-                    area.x
-                } else {
-                    area.x + width - button_width
-                };
+                let x = area.x + width - button_width;
                 let rect = Rect::new(x, area.y.saturating_add(1), button_width, 1);
-                frame.render_widget(
-                    Paragraph::new(label).style(
-                        Style::default()
-                            .fg(if self.busy { SOFT } else { BG })
-                            .bg(if self.busy { RAIL } else { BLUE })
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    rect,
-                );
                 self.branch_button = Some(rect);
             }
         }
@@ -2562,7 +2538,8 @@ mod tests {
     }
     #[test]
     fn repository_overview_stays_visible_when_scrolling_files() {
-        let mut data = snapshot("/project");
+        let mut data = snapshot("/workspace/project");
+        data.branch = "main".into();
         let template = data.files[0].clone();
         let staged = data.files[1].clone();
         data.files = (0..60)
@@ -2578,8 +2555,18 @@ mod tests {
         };
         let mut terminal = Terminal::new(TestBackend::new(48, 30)).unwrap();
         terminal.draw(|f| pane.draw(f)).unwrap();
+        let first: String = (0..48)
+            .map(|x| terminal.backend().buffer()[(x, 1)].symbol())
+            .collect();
+        assert!(first.contains("/workspace/project") && first.contains("main"));
+        let branch = pane.branch_button.unwrap();
+        let cell = &terminal.backend().buffer()[(branch.x, branch.y)];
+        assert_eq!(cell.fg, SOFT);
+        assert_eq!(cell.bg, BG);
+        assert!(!cell.modifier.contains(Modifier::BOLD));
+        let header_bottom = pane.body.y;
         let header = |terminal: &Terminal<TestBackend>| {
-            (1..6)
+            (1..header_bottom)
                 .map(|y| {
                     (0..48)
                         .map(|x| terminal.backend().buffer()[(x, y)].symbol())

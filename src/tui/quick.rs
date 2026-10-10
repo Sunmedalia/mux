@@ -404,12 +404,9 @@ pub(super) fn run(paths: AppPaths) -> Result<()> {
                             {
                                 Some(KeyCode::Char('v'))
                             }
-                            MouseEventKind::Down(MouseButton::Left)
-                                if m.row == if mini { 1 } else { 2 } =>
-                            {
-                                let tabs = Layout::horizontal([Constraint::Ratio(1, 4); 4]).split(
-                                    Rect::new(area.x, if mini { 1 } else { 2 }, area.width, 1),
-                                );
+                            MouseEventKind::Down(MouseButton::Left) if m.row == area.y + 1 => {
+                                let tabs = Layout::horizontal([Constraint::Ratio(1, 4); 4])
+                                    .split(Rect::new(area.x, area.y + 1, area.width, 1));
                                 if let Some(i) =
                                     tabs.iter().position(|r| contains(*r, m.column, m.row))
                                 {
@@ -1343,6 +1340,15 @@ mod tests {
         }
         let mut terminal = ratatui::Terminal::new(TestBackend::new(48, 30)).unwrap();
         terminal.draw(|frame| m.draw(frame)).unwrap();
+        let compact_rows = m.content(42).len();
+        let buffer = terminal.backend().buffer();
+        let row = |y| (0..48).map(|x| buffer[(x, y)].symbol()).collect::<String>();
+        assert!(row(1).contains("Codex"));
+        assert!(row(2).contains("CODEX ACCOUNT"));
+        assert!(row(28).contains("Checked"));
+        let mut tall = ratatui::Terminal::new(TestBackend::new(48, 40)).unwrap();
+        tall.draw(|frame| m.draw(frame)).unwrap();
+        assert_eq!(m.content(42).len(), compact_rows);
         assert!(
             terminal
                 .backend()

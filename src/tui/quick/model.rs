@@ -13,7 +13,6 @@ pub(super) struct Monitor {
     pub(super) git: git::GitPane,
     pub(super) visual_mode: bool,
     pub(super) preferences: config::UiPreferences,
-    pub(super) roomy_visual: bool,
     pub(super) sessions_sort_tokens: bool,
     pub(super) source_pane: Option<String>,
     pub(super) focused_pane: Option<String>,

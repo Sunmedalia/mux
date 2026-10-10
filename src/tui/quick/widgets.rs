@@ -564,9 +564,9 @@ pub(super) fn draw_page_tabs(
 pub(super) fn content_body(inner: Rect) -> Rect {
     Rect::new(
         inner.x,
-        inner.y + 4,
+        inner.y + 2,
         inner.width.saturating_sub(2),
-        inner.height.saturating_sub(7),
+        inner.height.saturating_sub(4),
     )
 }
 pub(super) fn mini_body(area: Rect) -> Rect {
