@@ -17,6 +17,7 @@ cargo test --locked --bin mux large_ledger_query_benchmark -- --ignored --nocapt
 CI 在 main/dev 分支推送、Pull Request、版本标签推送或手动触发时运行：Ubuntu、macOS 与 Windows 执行检查，Windows 额外验证 Rust 1.88、npm 启动器、MSVC 静态运行库及解压后的 ZIP。版本标签通过跨平台测试、依赖安全审计和 Docker 安全回归后生成 Release。Windows ZIP 附带 SHA-256 校验文件。
 
 独立 Rust 测试按串行调度，避免子进程继承文件锁造成偶发竞争，以及 macOS SQLite WAL 测试并行关闭连接造成超时。每个测试内部的并发请求、读写和冲突检查仍照常执行。
+统计数据库测试与代理一样复用同一 Writer 及其共享连接，保留并发 Ticket 的最终写入验证，避免异步写入期间反复创建、关闭独立 WAL 写连接。
 
 Codex 的自动测试使用隔离 HOME、模拟登录凭据和本地上游，不读取真实账号。可另行安装 Codex CLI 后运行真实进程冒烟测试（无 API 调用费用）：
 

@@ -1152,8 +1152,8 @@ pub(crate) mod tests {
     async fn persistent_ledger_scopes_clients_providers_days_and_compaction() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join(FILE);
-        Writer::new(path.clone()).recover().unwrap();
         let writer = Writer::new(path.clone());
+        writer.recover().unwrap();
         let mut jobs = vec![];
         for i in 0..16 {
             let writer = writer.clone();
@@ -1180,20 +1180,14 @@ pub(crate) mod tests {
             job.await.unwrap();
         }
         drop(
-            Ticket::begin(
-                Writer::new(path.clone()),
-                request("Codex", "same-id", "compact"),
-            )
-            .await
-            .unwrap(),
+            Ticket::begin(writer.clone(), request("Codex", "same-id", "compact"))
+                .await
+                .unwrap(),
         );
         drop(
-            Ticket::begin(
-                Writer::new(path.clone()),
-                request("Claude", "other", "generation"),
-            )
-            .await
-            .unwrap(),
+            Ticket::begin(writer.clone(), request("Claude", "other", "generation"))
+                .await
+                .unwrap(),
         );
         let snapshot = settled(&path, 18).await;
         assert_eq!(
@@ -1270,6 +1264,8 @@ pub(crate) mod tests {
     async fn model_breakdown_preserves_provider_client_and_daily_totals() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join(FILE);
+        // Match the daemon: retain one writer while tickets finalize asynchronously.
+        let writer = Writer::new(path.clone());
         for (client, provider, model, kind) in [
             ("Claude", "p1", "model-a", "generation"),
             ("Claude", "p1", "model-a", "generation"),
@@ -1280,9 +1276,7 @@ pub(crate) mod tests {
         ] {
             let mut request = request(client, provider, kind);
             request.model = model.into();
-            let mut ticket = Ticket::begin(Writer::new(path.clone()), request)
-                .await
-                .unwrap();
+            let mut ticket = Ticket::begin(writer.clone(), request).await.unwrap();
             ticket.outcome = "success";
             ticket.tokens = Tokens {
                 input: Some(10),
