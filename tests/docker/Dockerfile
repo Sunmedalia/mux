@@ -8,6 +8,6 @@ COPY resources ./resources
 COPY .cargo ./.cargo
 COPY src ./src
 COPY tests ./tests
-RUN cargo fmt --check && cargo clippy --locked --all-targets --all-features -- -D warnings && cargo test --locked --all-targets && cargo build --locked
+RUN cargo fmt --check && cargo clippy --locked --all-targets --all-features -- -D warnings && cargo test --locked --all-targets -- --test-threads=1 && cargo build --locked
 RUN cp target/debug/mux /usr/local/bin/mux-test && useradd -m -u 10001 testuser
 CMD ["python3", "/work/tests/docker/uninstall_safety.py"]

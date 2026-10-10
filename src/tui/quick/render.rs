@@ -44,7 +44,6 @@ impl Monitor {
             if let Some(picker) = &self.picker {
                 out.extend(picker.content(width));
             }
-            out.push(Line::default());
             return out;
         };
         if self.visual_mode {
@@ -87,21 +86,10 @@ impl Monitor {
                 out.push(line("LIMITS · USED", SOFT));
             }
             for (label, percent, reset) in &card.gauges {
-                out.push(compact_account_quota(label, *percent, width));
-                if !reset.is_empty() {
-                    out.push(pair(
-                        "↻",
-                        clipped(&compact_reset(reset), width.saturating_sub(2).into()),
-                        width,
-                        SOFT,
-                    ));
-                }
+                out.extend(account_quota_rows(label, Some(*percent), reset, width));
             }
             if let Some((label, reset)) = &card.unknown_gauge {
-                out.push(compact_account_meter(label, None, width));
-                if !reset.is_empty() {
-                    out.push(pair("↻", compact_reset(reset), width, SOFT));
-                }
+                out.extend(account_quota_rows(label, None, reset, width));
             }
             let row = |name| {
                 card.rows
@@ -137,11 +125,9 @@ impl Monitor {
             if card.id.is_some() && card.gauges.is_empty() && card.unknown_gauge.is_none() {
                 out.push(line("○ Limits unavailable · r refresh", SOFT));
             }
-            out.push(Line::default());
             return out;
         }
         for (label, percent, reset) in &card.gauges {
-            out.push(Line::default());
             out.push(pair(label, format!("{percent:.0}% used"), width, GOLD));
             out.push(Line::from(progress_spans(
                 Some(percent / 100.0),
@@ -158,7 +144,6 @@ impl Monitor {
             }
         }
         if let Some((label, reset)) = &card.unknown_gauge {
-            out.push(Line::default());
             out.push(pair(label, "— used", width, SOFT));
             out.push(line("▒".repeat(width.into()), RAIL));
             if !reset.is_empty() {
@@ -174,20 +159,18 @@ impl Monitor {
             ));
         }
         if !card.models.is_empty() {
-            out.push(Line::default());
             out.push(section("MODELS", width));
             for model in &card.models {
                 out.push(line(clipped(&format!("· {model}"), width.into()), SOFT));
             }
         }
-        out.push(Line::default());
         out
     }
     pub(super) fn grok_gateway_tokens(&self, width: u16) -> Vec<Line<'static>> {
         if !self.visual_mode {
             let mut out = self.stats_content(width);
             if let Some(title) = out.first_mut() {
-                *title = pair("GATEWAY TOKENS", self.snapshot.today(), width, BLUE);
+                *title = section_meta("GATEWAY TOKENS", &self.snapshot.today(), width);
             }
             if self.refreshed.is_some() && metrics(&self.snapshot, Some("Grok")).total.calls == 0 {
                 out.push(line(
@@ -195,7 +178,6 @@ impl Monitor {
                     SOFT,
                 ));
             }
-            out.push(Line::default());
             return out;
         }
         let totals = metrics(&self.snapshot, Some("Grok")).total;
@@ -206,7 +188,11 @@ impl Monitor {
         } else {
             short(totals.input + totals.output)
         };
-        let mut out = vec![pair("GATEWAY TOKENS", self.snapshot.today(), width, BLUE)];
+        let mut out = vec![section_meta(
+            "GATEWAY TOKENS",
+            &self.snapshot.today(),
+            width,
+        )];
         out.extend(if width < 30 {
             mini_token_total(&value, width, BLUE)
         } else {
@@ -235,7 +221,6 @@ impl Monitor {
                 format!("{} measured streams", totals.speed_samples),
                 SOFT,
             ));
-            out.push(Line::default());
             out.push(section("CALL HEALTH", width));
             out.push(health_meter(&totals, width));
             out.push(pair(
@@ -266,7 +251,6 @@ impl Monitor {
         } else {
             out.push(line("◌ Loading gateway…", SOFT));
         }
-        out.push(Line::default());
         out
     }
     pub(super) fn grok_tokens(&self, width: u16) -> Vec<Line<'static>> {
@@ -280,19 +264,15 @@ impl Monitor {
                 .filter(|s| s.client == "Grok" && s.tokens.known)
                 .max_by_key(|s| s.updated)
         };
-        let mut out = vec![
-            pair(
-                "SESSION TOKENS",
-                if selected.is_some() {
-                    "● Active"
-                } else {
-                    "Recent"
-                },
-                width,
-                GREEN,
-            ),
-            Line::default(),
-        ];
+        let mut out = vec![section_meta(
+            "SESSION TOKENS",
+            if selected.is_some() {
+                "● Active"
+            } else {
+                "Recent"
+            },
+            width,
+        )];
         let value = row
             .filter(|s| s.tokens.known)
             .map(|s| short(s.tokens.total()))
@@ -357,7 +337,6 @@ impl Monitor {
                 SOFT,
             ));
         }
-        out.push(Line::default());
         out
     }
     pub(super) fn content(&self, width: u16) -> Vec<Line<'static>> {
@@ -935,12 +914,11 @@ impl Monitor {
     pub(super) fn visual_home_content(&self, width: u16) -> Vec<Line<'static>> {
         let m = metrics(&self.snapshot, self.client());
         let t = &m.total;
-        let mut out = vec![pair("TOKENS", self.snapshot.today(), width, SOFT)];
+        let mut out = vec![section_meta("TOKENS", &self.snapshot.today(), width)];
         if self.refreshed.is_none() {
             out.push(line("◌ Reading gateway usage…", SOFT));
             let active = self.visual_active_content(width);
             if !active.is_empty() {
-                out.push(Line::default());
                 out.extend(active);
             }
             return out;
@@ -966,7 +944,6 @@ impl Monitor {
         out.extend(gateway_cache_meter(t, unknown, width));
         out.push(speed_pair("↗ Rate", t, width));
         out.push(line(format!("{} measured streams", t.speed_samples), SOFT));
-        out.push(Line::default());
         out.push(section("CALL HEALTH", width));
         let health = rate(t);
         out.push(health_meter(t, width));
@@ -986,10 +963,8 @@ impl Monitor {
         out.push(pair("Compaction", m.compact.to_string(), width, SOFT));
         let active = self.visual_active_content(width);
         if !active.is_empty() {
-            out.push(Line::default());
             out.extend(active);
         }
-        out.push(Line::default());
         out.push(if self.models {
             section_action("MODELS / TODAY", "[Providers m]", width)
         } else {
@@ -1098,7 +1073,6 @@ impl Monitor {
             return out;
         }
         let suffix = if s.incomplete { "+?" } else { "" };
-        out.push(Line::default());
         out.extend(token_digits(&short(s.tokens.total()), METRIC));
         if !suffix.is_empty() {
             out.push(line("+? partial token log", GOLD));
@@ -1202,7 +1176,7 @@ impl Monitor {
         let t = &m.total;
         let ready = self.refreshed.is_some();
         if !ready {
-            out.push(pair("TOKENS", self.snapshot.today(), width, SOFT));
+            out.push(section_meta("TOKENS", &self.snapshot.today(), width));
             out.push(line("◌ Reading gateway usage…", SOFT));
             let active = if self.client == 2 {
                 vec![]
@@ -1210,7 +1184,6 @@ impl Monitor {
                 self.active_content(width)
             };
             if !active.is_empty() {
-                out.push(Line::default());
                 out.extend(active);
             }
             return out;
@@ -1221,7 +1194,7 @@ impl Monitor {
         } else {
             short(t.input + t.output)
         };
-        out.extend([pair("TOKENS", self.snapshot.today(), width, SOFT)]);
+        out.extend([section_meta("TOKENS", &self.snapshot.today(), width)]);
         out.extend(token_digits(&value, BLUE));
         let input = if unknown {
             "—".into()
@@ -1248,7 +1221,6 @@ impl Monitor {
                 GOLD,
             ));
         }
-        out.push(Line::default());
         out.push(pair(
             "REQUESTS",
             if ready {
@@ -1289,7 +1261,6 @@ impl Monitor {
             format!("  ↳ {} measured streams", t.speed_samples),
             SOFT,
         ));
-        out.push(Line::default());
         out.push(section("CALL HEALTH", width));
         let health = rate(t);
         let color = if t.failed + t.interrupted > 0 {
@@ -1333,10 +1304,8 @@ impl Monitor {
             self.active_content(width)
         };
         if !active.is_empty() {
-            out.push(Line::default());
             out.extend(active);
         }
-        out.push(Line::default());
         out.push(if self.models {
             section_action("MODELS / TODAY", "[Providers m]", width)
         } else {
@@ -1367,10 +1336,7 @@ impl Monitor {
             out.push(line("No tracked requests today", SOFT));
             out.push(line("Waiting for gateway traffic…", SOFT));
         }
-        for (index, (name, t)) in entries.into_iter().enumerate() {
-            if index > 0 {
-                out.push(Line::default());
-            }
+        for (name, t) in entries {
             out.push(line(name, INK));
             out.push(pair(
                 &format!("{} calls · {} tok", t.calls, token_label(t)),

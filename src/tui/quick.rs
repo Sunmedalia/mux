@@ -1952,6 +1952,14 @@ mod account_page_tests {
                 for width in [20, 32, 48] {
                     monitor.client = 1;
                     let codex = monitor.account_content(width);
+                    assert!(codex.iter().all(|line| !line.to_string().trim().is_empty()));
+                    let tokens = monitor.stats_content(width);
+                    assert_eq!(tokens[0].spans[0].style, codex[0].spans[0].style);
+                    assert!(
+                        tokens
+                            .iter()
+                            .all(|line| !line.to_string().trim().is_empty())
+                    );
                     monitor.client = 2;
                     let grok = monitor.account_content(width);
                     assert_eq!(codex[1..], grok[1..]);

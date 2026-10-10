@@ -224,6 +224,31 @@ pub(super) fn section(title: &str, width: u16) -> Line<'static> {
         ),
     ])
 }
+pub(super) fn section_meta(title: &str, meta: &str, width: u16) -> Line<'static> {
+    if usize::from(width) <= title.width() {
+        return Line::from(Span::styled(
+            clipped(title, usize::from(width)),
+            Style::default().fg(INK).add_modifier(Modifier::BOLD),
+        ));
+    }
+    let meta = if title.width() + meta.width() + 2 <= usize::from(width) {
+        meta
+    } else {
+        ""
+    };
+    let reserved = if meta.is_empty() { 0 } else { meta.width() + 1 };
+    let mut header = section(
+        &clipped(title, usize::from(width).saturating_sub(reserved)),
+        width.saturating_sub(reserved as u16),
+    );
+    if !meta.is_empty() {
+        header.spans.push(Span::raw(" "));
+        header
+            .spans
+            .push(Span::styled(meta.to_owned(), Style::default().fg(SOFT)));
+    }
+    header
+}
 pub(super) fn section_action(title: &str, action: &str, width: u16) -> Line<'static> {
     let available = usize::from(width).saturating_sub(action.width() + 1);
     let title = clipped(title, available);
@@ -318,6 +343,36 @@ pub(super) fn quota_color(percent: f64) -> Color {
 }
 pub(super) fn compact_account_quota(label: &str, percent: f64, width: u16) -> Line<'static> {
     compact_account_meter(label, Some(percent), width)
+}
+pub(super) fn account_quota_rows(
+    label: &str,
+    percent: Option<f64>,
+    reset: &str,
+    width: u16,
+) -> Vec<Line<'static>> {
+    let reset = compact_reset(reset);
+    let suffix = format!(" ↻ {reset}");
+    let meter_width = width.saturating_sub(suffix.width() as u16);
+    let meter = |width| match percent {
+        Some(percent) => compact_account_quota(label, percent, width),
+        None => compact_account_meter(label, None, width),
+    };
+    if !reset.is_empty() && meter_width >= 16 {
+        let mut row = meter(meter_width);
+        row.spans
+            .push(Span::styled(suffix, Style::default().fg(SOFT)));
+        return vec![row];
+    }
+    let mut rows = vec![meter(width)];
+    if !reset.is_empty() {
+        rows.push(pair(
+            "↻",
+            clipped(&reset, usize::from(width.saturating_sub(2))),
+            width,
+            SOFT,
+        ));
+    }
+    rows
 }
 pub(super) fn compact_account_meter(
     label: &str,
