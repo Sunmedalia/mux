@@ -2024,6 +2024,110 @@ mod account_page_tests {
     }
 
     #[test]
+    fn subscription_home_hides_gateway_and_keeps_accounts_and_local_sessions() {
+        for client in [1, 2] {
+            let name = if client == 1 { "Codex" } else { "Grok" };
+            let mut monitor = Monitor {
+                client,
+                source_pane: Some("w1:p1".into()),
+                active_session: Some(AgentSession {
+                    client: name,
+                    id: "current".into(),
+                }),
+                refreshed: Some(Instant::now()),
+                sessions_refreshed: Some(Instant::now()),
+                ..Default::default()
+            };
+            monitor.sessions.rows.push(crate::sessions::Session {
+                id: "current".into(),
+                client: name,
+                tokens: crate::sessions::Tokens {
+                    input: 800,
+                    output: 200,
+                    known: true,
+                    ..Default::default()
+                },
+                ..Default::default()
+            });
+            let card = accounts::Card {
+                name: "Fixture account".into(),
+                gauges: vec![("Weekly".into(), 25.0, "tomorrow".into())],
+                ..Default::default()
+            };
+            monitor.accounts.codex.card = Some(card.clone());
+            monitor.accounts.grok.card = Some(card);
+            for subscription in [true, false, true] {
+                monitor.accounts.codex.subscription = subscription;
+                monitor.accounts.grok.subscription = subscription;
+                for visual in [false, true] {
+                    monitor.visual_mode = visual;
+                    let text = monitor
+                        .content(48)
+                        .iter()
+                        .map(Line::to_string)
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    assert!(text.contains("Fixture account") && text.contains("Weekly"));
+                    assert!(text.contains(if client == 1 {
+                        "SESSION / ALL TIME"
+                    } else {
+                        "SESSION TOKENS"
+                    }));
+                    assert_eq!(
+                        text.contains("CALL HEALTH"),
+                        !subscription,
+                        "{name}: {text}"
+                    );
+                    assert_eq!(
+                        text.lines()
+                            .any(|line| line.starts_with("TOKENS")
+                                || line.starts_with("GATEWAY TOKENS")),
+                        !subscription
+                    );
+                    for (width, height) in [(48, 40), (28, 32), (12, 20)] {
+                        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                        terminal.draw(|frame| monitor.draw(frame)).unwrap();
+                        if subscription {
+                            let text = terminal
+                                .backend()
+                                .buffer()
+                                .content
+                                .iter()
+                                .map(|cell| cell.symbol())
+                                .collect::<String>();
+                            assert!(
+                                !text.contains("CALL HEALTH") && !text.contains("GATEWAY / DETAIL")
+                            );
+                        }
+                    }
+                }
+            }
+            for page in [
+                config::PulseStartPage::Sessions,
+                config::PulseStartPage::Charts,
+            ] {
+                monitor.page = page;
+                monitor.accounts.codex.subscription = false;
+                monitor.accounts.grok.subscription = false;
+                let api = monitor.content(48);
+                monitor.accounts.codex.subscription = true;
+                monitor.accounts.grok.subscription = true;
+                assert_eq!(api, monitor.content(48));
+            }
+            monitor.page = config::PulseStartPage::Home;
+            for client in [0, 3] {
+                monitor.client = client;
+                assert!(
+                    monitor
+                        .content(48)
+                        .iter()
+                        .any(|line| line.to_string().contains("CALL HEALTH"))
+                );
+            }
+        }
+    }
+
+    #[test]
     fn grok_text_and_compact_views_show_measured_gateway_and_session_rates() {
         let mut monitor = Monitor {
             client: 2,
@@ -2264,6 +2368,7 @@ mod account_page_tests {
                         badge: "plus".into(),
                         ..Default::default()
                     }),
+                    ..Default::default()
                 },
                 grok: accounts::Info {
                     lines: vec![
@@ -2278,6 +2383,7 @@ mod account_page_tests {
                         gauges: vec![("Weekly".into(), 25.0, "tomorrow".into())],
                         ..Default::default()
                     }),
+                    ..Default::default()
                 },
             },
             ..Default::default()

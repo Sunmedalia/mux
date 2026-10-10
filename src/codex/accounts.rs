@@ -769,31 +769,68 @@ pub(super) fn clear_live_auth(home: &Path, doc: &DocumentMut) -> Result<()> {
 
 /// Read local identity without refreshing tokens or validating them remotely.
 pub fn live_login() -> Result<(Option<String>, String)> {
+    let login = live_login_state()?;
+    Ok((login.id, login.summary))
+}
+
+pub struct LiveLogin {
+    pub id: Option<String>,
+    pub summary: String,
+    /// The selected provider uses the local ChatGPT login, rather than an API key.
+    pub subscription: bool,
+}
+
+pub fn live_login_state() -> Result<LiveLogin> {
     let home = home()?;
     let doc = document(&home)?;
+    let auth = read_live_auth(&home, &doc)?;
+    Ok(login_state(&doc, auth.as_ref()))
+}
+
+fn login_state(doc: &DocumentMut, auth: Option<&Value>) -> LiveLogin {
     let mode = doc
         .get("model_provider")
         .and_then(Item::as_str)
         .unwrap_or("openai");
-    let Some(auth) = read_live_auth(&home, &doc)? else {
-        return Ok((
-            None,
-            format!("Provider: {mode} · No local subscription login · i import / n login"),
-        ));
+    let Some(auth) = auth else {
+        return LiveLogin {
+            id: None,
+            summary: format!("Provider: {mode} · No local subscription login · i import / n login"),
+            subscription: false,
+        };
     };
-    match identity(&auth) {
-        Ok(identity) => Ok((
-            Some(identity.id),
-            format!(
+    let provider_auth = doc
+        .get("model_providers")
+        .and_then(|providers| providers.get(mode))
+        .and_then(|provider| provider.get("requires_openai_auth"))
+        .and_then(Item::as_bool)
+        .unwrap_or(mode == "openai");
+    let subscription = provider_auth
+        && doc
+            .get("forced_login_method")
+            .and_then(Item::as_str)
+            .is_none_or(|mode| mode == "chatgpt")
+        && !(mode == "openai" && doc.get("openai_base_url").is_some())
+        && match auth["auth_mode"].as_str() {
+            Some("chatgpt") => true,
+            None => auth["OPENAI_API_KEY"].as_str().is_none_or(str::is_empty),
+            _ => false,
+        };
+    match identity(auth) {
+        Ok(identity) => LiveLogin {
+            id: Some(identity.id),
+            summary: format!(
                 "Provider: {mode} · Local login: {} ({}) · credentials not validated",
                 identity.account.email,
                 identity.account.plan.as_deref().unwrap_or("unknown plan")
             ),
-        )),
-        Err(_) => Ok((
-            None,
-            format!("Provider: {mode} · No readable subscription identity · n login"),
-        )),
+            subscription,
+        },
+        Err(_) => LiveLogin {
+            id: None,
+            summary: format!("Provider: {mode} · No readable subscription identity · n login"),
+            subscription: false,
+        },
     }
 }
 
@@ -836,6 +873,43 @@ mod windows_keyring_tests {
 #[cfg(test)]
 mod usage_display_tests {
     use super::*;
+
+    #[test]
+    fn live_login_mode_distinguishes_subscription_from_api_with_saved_tokens() {
+        let claims = json!({"sub":"test", "email":"test@example.test", "https://api.openai.com/auth":{"chatgpt_account_id":"workspace"}});
+        let payload = URL_SAFE_NO_PAD.encode(claims.to_string());
+        let mut auth = json!({"auth_mode":"chatgpt", "tokens":{
+            "id_token":format!("e30.{payload}.sig"), "access_token":"fixture", "refresh_token":"fixture"
+        }});
+        for (config, subscription) in [
+            ("", true),
+            ("model_provider='openai'", true),
+            (
+                "model_provider='mux'\n[model_providers.mux]\nrequires_openai_auth=false",
+                false,
+            ),
+            (
+                "model_provider='custom'\n[model_providers.custom]\nrequires_openai_auth=true",
+                true,
+            ),
+            ("model_provider='custom'", false),
+            ("openai_base_url='https://example.invalid/v1'", false),
+            ("forced_login_method='api'", false),
+        ] {
+            let doc = config.parse::<DocumentMut>().unwrap();
+            let state = login_state(&doc, Some(&auth));
+            assert!(state.id.is_some(), "saved identity should remain readable");
+            assert_eq!(state.subscription, subscription, "{config}");
+        }
+        let doc = DocumentMut::new();
+        assert!(!login_state(&doc, None).subscription);
+        auth["auth_mode"] = json!("apikey");
+        assert!(!login_state(&doc, Some(&auth)).subscription);
+        auth.as_object_mut().unwrap().remove("auth_mode");
+        assert!(login_state(&doc, Some(&auth)).subscription);
+        auth["OPENAI_API_KEY"] = json!("fixture-api-key");
+        assert!(!login_state(&doc, Some(&auth)).subscription);
+    }
 
     #[test]
     fn cached_usage_formats_windows_without_claiming_live_login() {

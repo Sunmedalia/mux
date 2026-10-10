@@ -1,6 +1,13 @@
 use super::*;
 
 impl Monitor {
+    fn subscription_mode(&self) -> bool {
+        match self.client {
+            1 => self.accounts.codex.subscription,
+            2 => self.accounts.grok.subscription,
+            _ => false,
+        }
+    }
     pub(super) fn header_git_rect(&self, area: Rect, mini: bool) -> Rect {
         page_tab_rects(area, if mini { 4 } else { 9 })[1]
     }
@@ -351,7 +358,9 @@ impl Monitor {
                 return self.chart_content(width);
             }
             let mut out = self.account_content(width);
-            out.extend(self.grok_gateway_tokens(width));
+            if !self.subscription_mode() {
+                out.extend(self.grok_gateway_tokens(width));
+            }
             out.extend(self.grok_tokens(width));
             return out;
         }
@@ -512,6 +521,13 @@ impl Monitor {
             out.push(mini_line("SESSION / HOURLY TOKENS", width, GREEN));
             out.extend(mini_hourly_rows(&session, width, GREEN));
             return out;
+        }
+        if self.subscription_mode() {
+            return if self.visual_mode {
+                self.visual_active_content(width)
+            } else {
+                self.active_content(width)
+            };
         }
         let m = metrics(&self.snapshot, self.client());
         let t = &m.total;
@@ -712,6 +728,7 @@ impl Monitor {
         let body = mini_body(area);
         let mut content = self.mini_content(body.width);
         if self.client != 2
+            && !self.subscription_mode()
             && self.visual_mode
             && !self.help
             && self.page != config::PulseStartPage::Sessions
@@ -912,6 +929,9 @@ impl Monitor {
         out
     }
     pub(super) fn visual_home_content(&self, width: u16) -> Vec<Line<'static>> {
+        if self.subscription_mode() {
+            return self.visual_active_content(width);
+        }
         let m = metrics(&self.snapshot, self.client());
         let t = &m.total;
         let mut out = vec![section_meta("TOKENS", &self.snapshot.today(), width)];
@@ -1170,6 +1190,9 @@ impl Monitor {
         }
         if self.visual_mode {
             return self.visual_home_content(width);
+        }
+        if self.subscription_mode() {
+            return self.active_content(width);
         }
         let mut out = vec![];
         let m = metrics(&self.snapshot, self.client());

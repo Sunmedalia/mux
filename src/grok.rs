@@ -633,6 +633,31 @@ pub fn apply(
     Ok(applied_default)
 }
 
+/// Whether the native default model uses the local OAuth login. Saved OAuth
+/// credentials can coexist with API models, so credentials alone are insufficient.
+pub fn uses_subscription(home: &Path, settings: &Settings) -> Result<bool> {
+    if !auth::status(home)?.saved {
+        return Ok(false);
+    }
+    let doc = document(&home.join("config.toml"))?;
+    let native_default = doc
+        .get("models")
+        .and_then(|models| models.get("default"))
+        .and_then(Item::as_str);
+    let model = native_default.or(settings.preferences.default.as_deref());
+    Ok(!model.is_some_and(|model| {
+        settings.managed_key(model)
+            || doc
+                .get("model")
+                .and_then(|models| models.get(model))
+                .is_some()
+    }) && !(model.is_none() && settings.active_mode == Some(Mode::Api))
+        && doc
+            .get("endpoints")
+            .and_then(|endpoints| endpoints.get("models_base_url"))
+            .is_none())
+}
+
 /// Verify a native model will inherit the CLI session rather than a local API override.
 pub fn validate_oauth_model(home: &Path, model: &str) -> Result<()> {
     let status = auth::status(home)?;

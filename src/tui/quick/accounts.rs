@@ -13,6 +13,7 @@ use std::{
 pub(super) struct Info {
     pub lines: Vec<String>,
     pub card: Option<Card>,
+    pub subscription: bool,
 }
 #[derive(Clone, Debug, Default)]
 pub(super) struct Card {
@@ -33,7 +34,12 @@ pub(super) struct Accounts {
 fn safe(text: &str) -> String {
     text.chars().filter(|c| !c.is_control()).take(300).collect()
 }
-fn codex_info(config: &config::Config, live: Option<&str>, local: &str) -> Info {
+fn codex_info(
+    config: &config::Config,
+    live: Option<&str>,
+    local: &str,
+    subscription: bool,
+) -> Info {
     let active = match &config.codex.active {
         Some(codex::Selection::Account { id }) => Some(id.as_str()),
         _ => None,
@@ -173,6 +179,7 @@ fn codex_info(config: &config::Config, live: Option<&str>, local: &str) -> Info 
     Info {
         lines,
         card: Some(card),
+        subscription,
     }
 }
 fn grok_info(
@@ -361,6 +368,7 @@ fn grok_info(
     Info {
         lines,
         card: Some(card),
+        subscription: grok::uses_subscription(home, &config.grok).unwrap_or(false),
     }
 }
 pub(super) fn spawn(
@@ -380,8 +388,14 @@ pub(super) fn spawn(
             let config = config::load(&paths.config);
             let info = match config {
                 Ok(mut config) => {
-                    let (live, local) = codex::accounts::live_login()
-                        .unwrap_or_else(|_| (None, "Local Codex login unavailable".into()));
+                    let login = codex::accounts::live_login_state().unwrap_or_else(|_| {
+                        codex::accounts::LiveLogin {
+                            id: None,
+                            summary: "Local Codex login unavailable".into(),
+                            subscription: false,
+                        }
+                    });
+                    let live = login.id;
                     if force && client == 1 {
                         let id = match &config.codex.active {
                             Some(codex::Selection::Account { id }) => Some(id.clone()),
@@ -394,7 +408,8 @@ pub(super) fn spawn(
                             }
                         }
                     }
-                    let codex = codex_info(&config, live.as_deref(), &local);
+                    let codex =
+                        codex_info(&config, live.as_deref(), &login.summary, login.subscription);
                     let grok = match grok::home() {
                         Ok(home) => {
                             let account = grok::usage::account(&home).ok().flatten();
@@ -468,6 +483,50 @@ pub(super) fn spawn(
 mod tests {
     use super::*;
     #[test]
+    fn grok_subscription_mode_follows_native_model_even_with_saved_oauth() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            home.path().join("auth.json"),
+            r#"{"auth_mode":"oidc","key":"fixture","expires_at":"2000-01-01T00:00:00Z"}"#,
+        )
+        .unwrap();
+        let mut config = config::Config::default();
+        config.grok.active_mode = Some(grok::Mode::Api);
+        config.grok.preferences.default = Some("mux::provider::model".into());
+        for (native, subscription) in [
+            ("", false),
+            ("[models]\ndefault='grok-build'", true),
+            ("[models]\ndefault='mux::provider::model'", false),
+            (
+                "[models]\ndefault='custom'\n[model.custom]\nbase_url='https://example.invalid/v1'",
+                false,
+            ),
+            (
+                "[models]\ndefault='grok-build'\n[endpoints]\nmodels_base_url='https://example.invalid'",
+                false,
+            ),
+        ] {
+            std::fs::write(home.path().join("config.toml"), native).unwrap();
+            assert_eq!(
+                grok_info(&config, home.path(), None, None).subscription,
+                subscription,
+                "{native}"
+            );
+        }
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[models]\ndefault='grok-build'",
+        )
+        .unwrap();
+        std::fs::write(
+            home.path().join("auth.json"),
+            r#"{"auth_mode":"api_key","key":"fixture"}"#,
+        )
+        .unwrap();
+        assert!(!grok_info(&config, home.path(), None, None).subscription);
+    }
+
+    #[test]
     fn saved_codex_account_summary_distinguishes_applied_and_local_and_omits_errors() {
         let mut config = config::Config::default();
         config.codex.accounts.insert(
@@ -493,6 +552,7 @@ mod tests {
             &config,
             Some("two"),
             "Provider: openai · Local login: two@example.com",
+            true,
         )
         .lines
         .join("\n");
@@ -509,7 +569,7 @@ mod tests {
         }
         assert!(!summary.contains("SECRET-TOKEN"));
         assert_eq!(
-            codex_info(&config, Some("two"), "Local login: two@example.com")
+            codex_info(&config, Some("two"), "Local login: two@example.com", true)
                 .card
                 .unwrap()
                 .name,
