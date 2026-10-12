@@ -50,13 +50,7 @@ impl Monitor {
                     .active_session
                     .as_ref()
                     .is_some_and(|a| a.client == s.client && a.id == s.id)
-                    && (query.is_empty()
-                        || s.title
-                            .as_ref()
-                            .is_some_and(|t| t.to_lowercase().contains(&query))
-                        || s.project.to_lowercase().contains(&query)
-                        || s.id.to_lowercase().contains(&query)
-                        || s.models.iter().any(|m| m.to_lowercase().contains(&query)))
+                    && super::super::session_browser::matches(s, &query)
             })
             .collect()
     }
@@ -557,38 +551,13 @@ impl Monitor {
     }
 }
 pub(super) fn display_title(s: &Session) -> String {
-    s.title.clone().unwrap_or_else(|| {
-        let project = std::path::Path::new(&s.project)
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy();
-        format!(
-            "{} · {}",
-            if project.is_empty() {
-                "Unknown project"
-            } else {
-                &project
-            },
-            s.id.chars().take(8).collect::<String>()
-        )
-    })
+    super::super::session_browser::title(s)
 }
 fn search_line(query: &str, editing: bool, width: u16) -> String {
     let prefix = if width >= 16 { "Search(/): " } else { "/ " };
     let cursor = if editing { "▏" } else { "" };
     let available = usize::from(width).saturating_sub(prefix.width() + cursor.width());
-    let mut used = 0;
-    let suffix: String = query
-        .chars()
-        .rev()
-        .take_while(|c| {
-            used += c.width().unwrap_or(0);
-            used <= available
-        })
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect();
+    let suffix = super::super::session_browser::query_tail(query, available);
     clipped(&format!("{prefix}{suffix}{cursor}"), width.into())
 }
 pub(super) fn wrap_field(text: &str, width: u16) -> Vec<Line<'static>> {

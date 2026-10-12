@@ -207,6 +207,51 @@ pub(super) fn settings_content(area: Rect) -> Rect {
     }
 }
 
+fn theme_layout(area: Rect, menu: &SettingsMenu) -> (Rect, Option<Rect>) {
+    let mut body = settings_content(area);
+    if !matches!(menu.selected, 0 | 1) || (area.width < 76 && !menu.editing) {
+        return (body, None);
+    }
+    // Theme categories can use the entire remaining width, unlike text editors.
+    body.width = panel_inner(area).right().saturating_sub(body.x);
+    let bottom = area.bottom().saturating_sub(4);
+    if body.width >= 76 {
+        let fields_width = (body.width / 2).max(38);
+        let preview = Rect::new(
+            body.x + fields_width + 2,
+            body.y + 2,
+            body.width.saturating_sub(fields_width + 2),
+            bottom.saturating_sub(body.y + 2).min(16),
+        );
+        body.width = fields_width;
+        (body, (preview.height >= 3).then_some(preview))
+    } else {
+        let fields_height = if menu.selected == 0 {
+            5
+        } else {
+            let stride = if area.width >= 76 && area.height >= 22 {
+                2
+            } else {
+                1
+            };
+            3 + menu.fields().len() as u16 * stride
+        };
+        let preview = Rect::new(
+            body.x,
+            body.y + fields_height,
+            body.width,
+            bottom.saturating_sub(body.y + fields_height).min(14),
+        );
+        (body, (preview.height >= 3).then_some(preview))
+    }
+}
+
+pub(super) fn draw_theme_preview(frame: &mut ratatui::Frame, area: Rect, menu: &SettingsMenu) {
+    if let (_, Some(preview)) = theme_layout(area, menu) {
+        theme::draw_sample(frame, preview, menu.theme, menu.pulse, menu.selected == 1);
+    }
+}
+
 pub(super) fn client_editor_area(screen: Rect) -> Rect {
     let page = settings_page_area(screen);
     if page.width < 76 {
@@ -259,7 +304,7 @@ pub(super) fn settings_fields(area: Rect, menu: &SettingsMenu) -> Vec<(usize, Re
     if area.width < 76 && !menu.editing {
         return vec![];
     }
-    let body = settings_content(area);
+    let (body, _) = theme_layout(area, menu);
     let stride = if area.width >= 76 && area.height >= 22 {
         2
     } else {
@@ -332,7 +377,7 @@ pub(super) fn draw_menu(frame: &mut ratatui::Frame, area: Rect, menu: &SettingsM
         }
     }
     if wide || menu.editing {
-        let body = settings_content(area);
+        let (body, preview) = theme_layout(area, menu);
         frame.render_widget(
             Paragraph::new(SECTIONS[menu.selected].0).style(
                 Style::default()
@@ -391,7 +436,7 @@ pub(super) fn draw_menu(frame: &mut ratatui::Frame, area: Rect, menu: &SettingsM
                 );
             }
         }
-        if area.height >= 17 {
+        if area.height >= 17 && preview.is_none() {
             let note = match menu.selected {
                 0 => "Live preview · Save to keep this theme.",
                 1 => "Saved display changes update Pulse live. Start page applies on reopen.",
@@ -954,6 +999,70 @@ impl App {
                 }
             }
             _ => false,
+        }
+    }
+}
+
+#[cfg(test)]
+mod preview_tests {
+    use super::*;
+    use ratatui::{Terminal, backend::TestBackend};
+
+    #[test]
+    fn settings_theme_samples_fit_and_pulse_colors_are_independent() {
+        let (_temp, mut app) = crate::tui::tests::persisted_app();
+        app.open_settings_menu();
+        for (width, height) in [(40, 12), (60, 24), (80, 24), (120, 36), (160, 48)] {
+            for selected in [0, 1] {
+                let Some(Modal::SettingsMenu(menu)) = &mut app.modal else {
+                    panic!("settings missing")
+                };
+                menu.selected = selected;
+                menu.editing = true;
+                menu.theme = theme::Theme::Sand;
+                menu.pulse = theme::PulseTheme::Slate;
+                let menu = menu.clone();
+                let area =
+                    modal_area_for(app.modal.as_ref().unwrap(), Rect::new(0, 0, width, height));
+                let (fields, preview) = theme_layout(area, &menu);
+                if let Some(preview) = preview {
+                    assert!(preview.right() <= area.right());
+                    assert!(preview.bottom() <= area.bottom().saturating_sub(4));
+                    assert!(
+                        settings_fields(area, &menu)
+                            .iter()
+                            .all(|(_, r)| r.intersection(preview).is_empty())
+                    );
+                    if width >= 120 {
+                        assert!(preview.x > fields.x);
+                    }
+                }
+                let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                terminal.draw(|f| app.draw(f)).unwrap();
+                if selected == 1
+                    && let Some(preview) = preview
+                {
+                    let buffer = terminal.backend().buffer();
+                    assert_eq!(
+                        buffer[(preview.x + 1, preview.y + 1)].bg,
+                        Color::Rgb(24, 25, 27)
+                    );
+                    if preview.height >= 7 {
+                        assert!(
+                            buffer
+                                .content
+                                .iter()
+                                .any(|c| c.fg == Color::Rgb(133, 212, 162))
+                        );
+                        assert!(
+                            buffer
+                                .content
+                                .iter()
+                                .any(|c| c.fg == Color::Rgb(236, 104, 113))
+                        );
+                    }
+                }
+            }
         }
     }
 }

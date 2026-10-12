@@ -277,7 +277,15 @@ pub(in crate::tui) fn preview_lines(width: u16) -> Vec<Line<'static>> {
             ("Input", "IN", "96K", BLUE),
             ("Output", "OUT", "32.4K", METRIC),
         ),
-        Line::default(),
+        section("CALL HEALTH", width),
+        health_meter(
+            &Totals {
+                success: 98,
+                failed: 2,
+                ..Default::default()
+            },
+            width,
+        ),
         section("CURRENT SESSION", width),
         pair("Tokens", "42,800", width, METRIC),
         pair("Cache reuse", "68%", width, METRIC),
@@ -450,8 +458,14 @@ pub(super) fn health_meter(t: &Totals, width: u16) -> Line<'static> {
     }
     Line::from(vec![
         Span::styled("OK  ", Style::default().fg(SOFT)),
-        Span::styled("█".repeat(lengths[0]), Style::default().fg(GREEN)),
-        Span::styled("█".repeat(lengths[1]), Style::default().fg(RED)),
+        Span::styled(
+            "█".repeat(lengths[0]),
+            Style::default().fg(super::super::theme::HEALTH_SUCCESS),
+        ),
+        Span::styled(
+            "█".repeat(lengths[1]),
+            Style::default().fg(super::super::theme::HEALTH_ERROR),
+        ),
         Span::styled("█".repeat(lengths[2]), Style::default().fg(GOLD)),
     ])
 }

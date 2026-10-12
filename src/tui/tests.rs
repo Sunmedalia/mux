@@ -2651,7 +2651,7 @@ fn usage_page_opens_filters_and_renders_at_supported_sizes() {
             .collect::<String>();
         assert!(text.contains("Usage"));
         assert!(
-            text.contains("scroll") || text.contains("Reading gateway"),
+            text.contains("Gateway") && text.contains("Sessions"),
             "{text}"
         );
     }
@@ -2661,6 +2661,11 @@ fn usage_page_opens_filters_and_renders_at_supported_sizes() {
     }
     app.handle_key(KeyEvent::new(KeyCode::Char('6'), KeyModifiers::NONE))
         .unwrap();
+    // Session filters start independently from the Gateway agent selection.
+    for _ in 0..3 {
+        app.handle_key(KeyEvent::new(KeyCode::Char(']'), KeyModifiers::NONE))
+            .unwrap();
+    }
     let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
     terminal.draw(|frame| app.draw(frame)).unwrap();
     let text = terminal

@@ -238,7 +238,11 @@ pub(super) fn help_commands(section: HelpSection) -> &'static [(&'static str, &'
                 "r / x",
                 "Refresh logs and sessions / reset all dashboard filters",
             ),
-            ("h / Esc / F6", "Back to providers"),
+            (
+                "g / view buttons",
+                "Switch Gateway / Sessions; retain each view's filters and position",
+            ),
+            ("h / Esc / F6", "Back; Session details return to the list"),
             ("q / Esc", "Return to Providers; search consumes q as text"),
             (
                 "? / F4 / F2",
@@ -254,7 +258,7 @@ pub(super) fn help_commands(section: HelpSection) -> &'static [(&'static str, &'
             ("Tab / Shift+Tab", "Next / previous dashboard section"),
             (
                 "1–6",
-                "Providers / History / Metrics / Models / Charts / Sessions",
+                "Gateway: Providers / History / Metrics / Models / Charts; 6: Sessions",
             ),
             ("↑↓ / j k / wheel", "Scroll the page"),
             ("PgUp / PgDn", "Scroll one page"),
@@ -262,7 +266,7 @@ pub(super) fn help_commands(section: HelpSection) -> &'static [(&'static str, &'
             ("n / p / Alt+↓↑", "Next / previous row in the active table"),
             (
                 "Click row",
-                "Expand details in place without moving the page",
+                "Select a row; wide Sessions show a detail preview",
             ),
             (
                 "Enter / l",
@@ -271,7 +275,7 @@ pub(super) fn help_commands(section: HelpSection) -> &'static [(&'static str, &'
             ("c / v", "Calls / tokens chart"),
             (
                 "/",
-                "Focus Sessions and search project, session ID or model",
+                "Open Sessions search: title, project, full session ID or model",
             ),
             (
                 "f",
@@ -279,7 +283,10 @@ pub(super) fn help_commands(section: HelpSection) -> &'static [(&'static str, &'
             ),
             ("s", "Sessions: toggle recent / token sort"),
             ("Search ↑↓", "Select session while typing"),
-            ("Search Enter / Esc", "Leave search; query remains active"),
+            (
+                "Search Enter / Esc",
+                "Confirm query / cancel and restore query, selection and position",
+            ),
             (
                 "Search Backspace / Ctrl+U",
                 "Delete character / clear session query",

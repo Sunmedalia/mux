@@ -53,11 +53,6 @@ impl App {
     fn session_rows(&self, page: &UsagePage) -> Vec<&crate::sessions::Session> {
         let zone = chrono::FixedOffset::east_opt(self.usage.snapshot.offset)
             .unwrap_or_else(|| chrono::FixedOffset::east_opt(0).unwrap());
-        let terms: Vec<_> = page
-            .session_search
-            .split_whitespace()
-            .map(str::to_lowercase)
-            .collect();
         let mut rows: Vec<_> = self
             .usage
             .sessions
@@ -65,17 +60,7 @@ impl App {
             .iter()
             .filter(|s| {
                 page.client().is_none_or(|c| c == s.client)
-                    && (terms.is_empty() || {
-                        let haystack = format!(
-                            "{} {} {} {}",
-                            s.id,
-                            s.project,
-                            s.client,
-                            s.models.iter().cloned().collect::<Vec<_>>().join(" ")
-                        )
-                        .to_lowercase();
-                        terms.iter().all(|word| haystack.contains(word))
-                    })
+                    && session_browser::matches(s, &page.session_search)
                     && (!page.session_follow_range
                         || page.range == 3
                         || chrono::DateTime::from_timestamp(s.updated, 0).is_some_and(|t| {
@@ -83,18 +68,7 @@ impl App {
                         }))
             })
             .collect();
-        rows.sort_by(|a, b| {
-            if page.session_sort_tokens {
-                b.tokens
-                    .known
-                    .cmp(&a.tokens.known)
-                    .then_with(|| b.tokens.total().cmp(&a.tokens.total()))
-                    .then_with(|| b.updated.cmp(&a.updated))
-                    .then_with(|| a.id.cmp(&b.id))
-            } else {
-                b.updated.cmp(&a.updated).then_with(|| a.id.cmp(&b.id))
-            }
-        });
+        rows.sort_by(|a, b| session_browser::compare(a, b, page.session_sort_tokens));
         rows
     }
 
@@ -208,12 +182,19 @@ pub(super) struct DashboardState {
     jump: Option<usize>,
     reveal: Option<(usize, String)>,
     total_height: usize,
-    session_detail_y: usize,
-    inspect_session: bool,
     pub(super) effective_scroll: usize,
+}
+impl DashboardState {
+    pub(super) fn rows_len(&self, section: usize) -> usize {
+        self.rows[section].len()
+    }
 }
 #[derive(Clone, Copy)]
 enum Action {
+    Source(UsageSource),
+    SearchDone,
+    SearchCancel,
+    SearchClear,
     Client(usize),
     Range(usize),
     Previous,
@@ -228,9 +209,6 @@ enum Action {
     BackQuit,
     Search,
     SessionScope,
-    SessionClear,
-    SessionPrevious,
-    SessionNext,
     Activate(usize),
 }
 impl UsagePage {
@@ -238,6 +216,9 @@ impl UsagePage {
         self.dashboard.borrow_mut().jump = Some(self.section);
     }
     pub(super) fn select_table_row(&mut self, down: bool) {
+        self.select_table_delta(if down { 1 } else { -1 });
+    }
+    pub(super) fn select_table_delta(&mut self, delta: isize) {
         let mut state = self.dashboard.borrow_mut();
         let rows = &state.rows[self.section];
         if rows.is_empty() {
@@ -247,14 +228,10 @@ impl UsagePage {
             .iter()
             .position(|(key, _)| Some(key) == state.selected[self.section].as_ref())
             .unwrap_or(0);
-        let next = if down {
-            (index + 1).min(rows.len() - 1)
-        } else {
-            index.saturating_sub(1)
-        };
+        let next = index.saturating_add_signed(delta).min(rows.len() - 1);
         let (key, y) = rows[next].clone();
-        state.selected[self.section] = Some(key);
-        state.reveal = Some((self.section, state.selected[self.section].clone().unwrap()));
+        state.selected[self.section] = Some(key.clone());
+        state.reveal = Some((self.section, key));
         self.scroll = y
             .saturating_sub(usize::from(state.viewport.height.saturating_sub(1)).min(2))
             .min(self.limit.get());
@@ -341,7 +318,11 @@ fn health_bar(t: &Totals, width: u16) -> Line<'static> {
     let mut spans = vec![];
     let mut used = 0usize;
     let mut cumulative = 0i64;
-    for (count, color) in counts.into_iter().zip([CONNECTED, ERROR, WARNING]) {
+    for (count, color) in
+        counts
+            .into_iter()
+            .zip([theme::HEALTH_SUCCESS, theme::HEALTH_ERROR, WARNING])
+    {
         cumulative += count;
         let end = ((cumulative as f64 / completed as f64) * f64::from(width)).round() as usize;
         spans.push(Span::styled(
@@ -437,11 +418,37 @@ impl Canvas<'_, '_> {
         });
     }
     fn prepare(&mut self, section: usize, keys: Vec<String>) {
-        if !keys
+        let previous_index = self.state.rows[section]
             .iter()
-            .any(|key| Some(key) == self.state.selected[section].as_ref())
-        {
-            self.state.selected[section] = keys.first().cloned();
+            .position(|(key, _)| Some(key) == self.state.selected[section].as_ref());
+        let next_index = keys
+            .iter()
+            .position(|key| Some(key) == self.state.selected[section].as_ref());
+        if next_index.is_none() {
+            self.state.selected[section] = keys
+                .get(
+                    previous_index
+                        .unwrap_or(0)
+                        .min(keys.len().saturating_sub(1)),
+                )
+                .cloned();
+        }
+        let reordered = self.state.rows[section]
+            .iter()
+            .map(|(key, _)| key)
+            .ne(keys.iter());
+        if section == 5 && reordered && self.frame.is_none() {
+            // Preserve the first visible identity when live data or sorting moves rows.
+            let anchor = self.state.rows[section]
+                .iter()
+                .find(|(_, y)| *y >= self.scroll);
+            if let Some((key, y)) = anchor
+                && let Some(index) = keys.iter().position(|id| id == key)
+            {
+                let top = self.state.rows[section].first().map_or(0, |(_, y)| *y);
+                self.state.effective_scroll =
+                    (top + index * 2).saturating_sub(y.saturating_sub(self.scroll));
+            }
         }
         self.state.rows[section] = keys.into_iter().map(|key| (key, 0)).collect();
     }
@@ -635,13 +642,33 @@ fn health_lines(t: &Totals, compaction: &Totals, width: u16, loading: bool) -> V
     };
     wrapped(
         vec![
-            pair("SUCCESS", rate, CONNECTED),
+            pair(
+                "SUCCESS",
+                rate,
+                if completed > 0 {
+                    theme::HEALTH_SUCCESS
+                } else {
+                    MUTED
+                },
+            ),
             health_bar(t, width),
-            pair("Success", number(t.success), CONNECTED),
+            pair(
+                "Success",
+                number(t.success),
+                if completed > 0 {
+                    theme::HEALTH_SUCCESS
+                } else {
+                    MUTED
+                },
+            ),
             pair(
                 "Failed",
                 number(t.failed),
-                if t.failed > 0 { ERROR } else { MUTED },
+                if t.failed > 0 {
+                    theme::HEALTH_ERROR
+                } else {
+                    MUTED
+                },
             ),
             pair(
                 "Stopped",
@@ -675,8 +702,9 @@ fn session_detail(s: &crate::sessions::Session, width: u16) -> Vec<Line<'static>
             "unknown".into()
         }
     };
-    wrapped(
+    let mut lines = wrapped(
         vec![
+            pair("Title", session_browser::title(s), Color::White),
             Line::from(vec![
                 value(s.client, FIELD_LABEL),
                 muted(format!(
@@ -748,7 +776,23 @@ fn session_detail(s: &crate::sessions::Session, width: u16) -> Vec<Line<'static>
             ),
         ],
         width,
-    )
+    );
+    lines.push(Line::raw(""));
+    lines.push(value("HOURLY ACTIVITY · UTC", FIELD_LABEL).into());
+    if s.activity.is_empty() {
+        lines.push(muted("No hourly activity available").into());
+    } else {
+        let mut hours = BTreeMap::<i64, i64>::new();
+        for (timestamp, tokens) in &s.activity {
+            *hours.entry(timestamp.div_euclid(3600) * 3600).or_default() += tokens;
+        }
+        for (hour, tokens) in hours.iter().rev().take(24) {
+            let time = chrono::DateTime::from_timestamp(*hour, 0)
+                .map_or("—".into(), |t| t.format("%m-%d %H:%M").to_string());
+            lines.push(pair(&time, format!("{} tokens", number(*tokens)), ROUTE));
+        }
+    }
+    lines
 }
 
 fn cells(name: &str, t: &Totals, all: Option<&Totals>, width: u16) -> Line<'static> {
@@ -824,13 +868,25 @@ impl App {
             5,
             d.sessions
                 .iter()
-                .map(|s| format!("{}\u{1f}{}", s.client, s.id))
+                .map(|s| session_browser::identity(s))
                 .collect(),
         );
+        if page.source == UsageSource::Sessions {
+            return self.dashboard_sessions(c, c.viewport.x, 0, c.viewport.width, page, d);
+        }
         let x = c.viewport.x;
         let width = c.viewport.width;
         let gap = 2;
         let mut y = 0;
+        if self.usage.error.is_some() {
+            c.line(x, y, width, || {
+                Line::styled(
+                    "STALE · cached gateway data · r retry",
+                    Style::default().fg(WARNING),
+                )
+            });
+            y += 1;
+        }
         let gateway_width = if self.screen.width >= 80 {
             width * 3 / 5
         } else {
@@ -964,7 +1020,7 @@ impl App {
         } else {
             y = self.dashboard_metrics(c, x, left_end + 1, width, page, d) + 1;
         }
-        self.dashboard_sessions(c, x, y, width, page, d)
+        y
     }
     fn dashboard_providers(
         &self,
@@ -1227,6 +1283,15 @@ impl App {
                 )
             });
             y += 1;
+            if self.usage.sessions.warnings > 0 {
+                c.content(x, y, width, || {
+                    Line::styled(
+                        "Cached/partial logs · r retry",
+                        Style::default().fg(WARNING),
+                    )
+                });
+                y += 1;
+            }
             c.bottom(x, y, width);
             return y + 1;
         }
@@ -1358,224 +1423,134 @@ impl App {
         page: &UsagePage,
         d: &Data<'_>,
     ) -> usize {
-        c.header(x, y, width, "LOCAL SESSIONS · 6", Some(5));
-        y += 1;
-        let scope = if page.session_follow_range && page.range != 3 {
-            format!(
-                "Last active: {} – {}",
-                page.start_day().unwrap_or_else(|| "beginning".into()),
-                page.day
-            )
-        } else {
-            "All dates".into()
-        };
-        for line in wrapped(
-            vec![
-                Line::from(vec![
-                    value(format!("{} sessions", d.sessions.len()), ROUTE),
-                    muted(format!(
-                        " · {} · {scope}",
-                        page.client().unwrap_or("All agents")
-                    )),
-                ]),
-                Line::from(vec![
-                    label("Lifetime tokens"),
-                    muted(" · separate from gateway"),
-                ]),
-            ],
-            width.saturating_sub(2),
-        ) {
-            c.content(x, y, width, || line);
+        let selected = d
+            .sessions
+            .iter()
+            .enumerate()
+            .find(|(i, _)| c.selected(5, *i));
+        if page.session_detail {
+            c.header(x, y, width, "SESSION DETAILS", Some(5));
             y += 1;
-        }
-        let available = usize::from(width.saturating_sub(15));
-        let mut tail = String::new();
-        let mut used = 0;
-        for ch in page.session_search.chars().rev() {
-            let size = ch.width().unwrap_or(0);
-            if used + size > available {
-                break;
+            if let Some((_, session)) = selected {
+                for line in session_detail(session, width.saturating_sub(3)) {
+                    c.detail_content(x, y, width, line);
+                    y += 1;
+                }
+            } else {
+                c.content(x, y, width, || muted("Session unavailable · q back").into());
+                y += 1;
             }
-            tail.push(ch);
-            used += size;
+            c.bottom(x, y, width);
+            return y + 1;
         }
-        let query: String = tail.chars().rev().collect();
-        if let Some(screen_y) = c.visible(y)
-            && c.frame.is_some()
-        {
-            c.state.controls.push((
-                Rect::new(x + 1, screen_y, width.saturating_sub(2), 1),
-                Action::Search,
-            ));
-        }
+        c.header(x, y, width, "LOCAL SESSIONS", Some(5));
+        y += 1;
         c.content(x, y, width, || {
             Line::from(vec![
-                label("Search [/]  "),
-                if page.session_search.is_empty() && !page.session_searching {
-                    muted("project / ID / model")
-                } else {
-                    value(
-                        format!("{query}{}", if page.session_searching { "▏" } else { "" }),
-                        ROUTE,
-                    )
-                },
-            ])
-        });
-        y += 1;
-        let theme = c.theme;
-        let buttons = vec![
-            (
-                format!(
-                    "{} [s]",
-                    if page.session_sort_tokens {
-                        "Most tokens"
-                    } else {
-                        "Recent first"
-                    }
-                ),
-                Action::Sort,
-                false,
-            ),
-            (
-                format!(
-                    "{} [f]",
+                value(format!("{} sessions", d.sessions.len()), ROUTE),
+                muted(format!(
+                    " · {} · {}",
+                    page.client().unwrap_or("All agents"),
                     if page.session_follow_range {
                         "Follow period"
                     } else {
                         "All dates"
                     }
-                ),
-                Action::SessionScope,
-                page.session_follow_range,
-            ),
-            ("Clear filters".into(), Action::SessionClear, false),
-            ("Details [Enter]".into(), Action::Activate(5), false),
-        ];
-        let mut bx = x + 1;
-        for (text, action, selected) in buttons {
-            let text = fit(&text, usize::from(width.saturating_sub(4)).min(38), false)
-                .trim_end()
-                .to_owned();
-            let bw = (text.width() as u16 + 2).min(width.saturating_sub(2));
-            if bx > x + 1 && bx + bw > x + width - 1 {
-                c.rail(x, y, width);
-                y += 1;
-                bx = x + 1;
-            }
+                )),
+            ])
+        });
+        y += 1;
+        c.content(x, y, width, || {
+            muted("Lifetime tokens · independent of gateway").into()
+        });
+        y += 1;
+        if page.session_searching || !page.session_search.is_empty() {
             if let Some(screen_y) = c.visible(y)
                 && c.frame.is_some()
             {
-                c.state
-                    .controls
-                    .push((Rect::new(bx, screen_y, bw, 1), action));
+                c.state.controls.push((
+                    Rect::new(x + 1, screen_y, width.saturating_sub(2), 1),
+                    Action::Search,
+                ));
             }
-            c.line(bx, y, bw, || {
-                control_line(&text, action, selected, false, theme)
+            c.content(x, y, width, || {
+                Line::from(vec![
+                    label("Search / "),
+                    value(
+                        format!(
+                            "{}{}",
+                            session_browser::query_tail(
+                                &page.session_search,
+                                usize::from(width).saturating_sub(12)
+                            ),
+                            if page.session_searching { "▏" } else { "" }
+                        ),
+                        ROUTE,
+                    ),
+                ])
             });
-            bx += bw;
-        }
-        c.rail(x, y, width);
-        y += 1;
-        let hint = if page.session_searching {
-            "Type project, ID or model · Enter done · Esc done · Ctrl+U clear"
-        } else {
-            "Click / n,p select · Enter details · / search ID, project, model"
-        };
-        for line in wrapped(
-            vec![Line::styled(hint, Style::default().fg(MUTED))],
-            width.saturating_sub(2),
-        ) {
-            c.content(x, y, width, || line);
             y += 1;
         }
-        let selected = d
-            .sessions
-            .iter()
-            .enumerate()
-            .find(|(index, _)| c.selected(5, *index));
-        let selected_index = selected.map_or(0, |(index, _)| index);
-        let start = selected_index / 8 * 8;
-        let end = (start + 8).min(d.sessions.len());
         let split = width >= 100;
         let list_width = if split { width * 3 / 5 } else { width };
         let detail_x = x + list_width;
         let detail_width = width.saturating_sub(list_width);
         let detail_y = y;
-        c.content(x, y, list_width, || {
-            Line::from(vec![
-                label(fit(
-                    "Project / session",
-                    usize::from(list_width.saturating_sub(2)).saturating_sub(20),
-                    false,
-                )),
-                label(format!(" {}", fit("Tokens", 10, true))),
-                label("  Agent"),
-            ])
-        });
-        y += 1;
         if d.sessions.is_empty() {
-            for line in wrapped(
-                vec![Line::styled(
-                    if self.usage.sessions_updated.is_none() && self.usage.sessions.rows.is_empty()
-                    {
-                        "Reading local sessions…"
-                    } else if !page.session_search.is_empty() || page.session_follow_range {
-                        "No matches · clear session filters or select All agents"
-                    } else if page.client() == Some("Pi") {
-                        "Pi local sessions are not supported"
-                    } else {
-                        "No sessions for this agent"
-                    },
-                    Style::default().fg(MUTED),
-                )],
-                list_width.saturating_sub(2),
-            ) {
+            let message =
+                if self.usage.sessions_updated.is_none() && self.usage.sessions.rows.is_empty() {
+                    "Reading local sessions…"
+                } else if !page.session_search.is_empty() || page.session_follow_range {
+                    "No matches · clear filters or select All agents"
+                } else if page.client() == Some("Pi") {
+                    "Pi local sessions are not supported"
+                } else {
+                    "No sessions for this agent"
+                };
+            for line in wrapped(vec![muted(message).into()], list_width.saturating_sub(2)) {
                 c.content(x, y, list_width, || line);
                 y += 1;
             }
         }
         let zone = chrono::FixedOffset::east_opt(self.usage.snapshot.offset)
             .unwrap_or_else(|| chrono::FixedOffset::east_opt(0).unwrap());
-        for (index, s) in d.sessions.iter().enumerate().take(end).skip(start) {
+        for (index, session) in d.sessions.iter().enumerate() {
             c.row(x, y, list_width, 5, index, |w| {
-                let project = std::path::Path::new(&s.project)
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy();
-                let title = if project.is_empty() {
-                    s.id.chars().take(8).collect::<String>()
-                } else {
-                    project.into_owned()
-                };
-                let amount = if s.tokens.known {
-                    format!(
-                        "{}{}",
-                        compact(s.tokens.total()),
-                        if s.incomplete { " + ?" } else { "" }
-                    )
-                } else {
-                    "unknown".into()
-                };
-                Line::from(vec![
-                    Span::raw(fit(&title, usize::from(w).saturating_sub(20), false)),
-                    value(format!(" {}", fit(&amount, 10, true)), ROUTE),
-                    label(format!(" {}", fit(s.client, 8, true))),
-                ])
+                Line::from(value(
+                    fit(&session_browser::title(session), usize::from(w), false),
+                    Color::White,
+                ))
             });
             y += 1;
-            let date = chrono::DateTime::from_timestamp(s.updated, 0).map_or("—".into(), |t| {
-                t.with_timezone(&zone).format("%m-%d %H:%M").to_string()
-            });
+            let date = chrono::DateTime::from_timestamp(session.updated, 0)
+                .map_or("—".into(), |t| {
+                    t.with_timezone(&zone).format("%m-%d %H:%M").to_string()
+                });
+            let amount = if session.tokens.known {
+                format!(
+                    "{}{}",
+                    compact(session.tokens.total()),
+                    if session.incomplete { " + ?" } else { "" }
+                )
+            } else {
+                "unknown".into()
+            };
             c.content(x, y, list_width, || {
-                Line::from(vec![muted(format!(
-                    "{} · {}{}{}",
-                    s.id.chars().take(8).collect::<String>(),
-                    date,
-                    if s.child { " · child" } else { "" },
-                    if s.fork { " · fork" } else { "" }
-                ))])
+                Line::from(vec![
+                    value(format!("{} · {}", session.client, amount), ROUTE),
+                    muted(format!(
+                        " · {}{}{}{}",
+                        date,
+                        if session.child { " · child" } else { "" },
+                        if session.fork { " · fork" } else { "" },
+                        if session.project.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" · {}", session.project)
+                        }
+                    )),
+                ])
             });
-            // Both identity and timestamp lines select the same session.
             if let Some(screen_y) = c.visible(y)
                 && c.frame.is_some()
             {
@@ -1587,76 +1562,38 @@ impl App {
             }
             y += 1;
         }
-        let paging = format!(
-            "{}–{} / {}",
-            if end == 0 { 0 } else { start + 1 },
-            end,
-            d.sessions.len()
-        );
-        c.content(x, y, list_width, || Line::from(vec![muted(paging)]));
-        let mut px = x + list_width.saturating_sub(19);
-        for (text, action, disabled) in [
-            ("Prev", Action::SessionPrevious, start == 0),
-            ("Next", Action::SessionNext, end == d.sessions.len()),
-        ] {
-            if !disabled
-                && let Some(screen_y) = c.visible(y)
-                && c.frame.is_some()
-            {
-                c.state
-                    .controls
-                    .push((Rect::new(px, screen_y, 8, 1), action));
-            }
-            c.line(px, y, 8, || {
-                control_line(text, action, false, disabled, theme)
-            });
-            px += 8;
-        }
-        y += 1;
-        let mut inspector_y = if split { detail_y } else { y + 1 };
-        let (ix, iw) = if split {
-            (detail_x, detail_width)
-        } else {
-            (x, width)
-        };
-        c.state.session_detail_y = inspector_y;
-        c.detail_content(
-            ix,
-            inspector_y,
-            iw,
-            value("SELECTED SESSION", FIELD_LABEL).into(),
-        );
-        inspector_y += 1;
-        if let Some((_, session)) = selected {
-            for line in session_detail(session, iw.saturating_sub(3)) {
-                c.detail_content(ix, inspector_y, iw, line);
-                inspector_y += 1;
-            }
-        }
-        let bottom = y.max(inspector_y);
-        // Complete both rails even when the list and inspector have different heights.
-        for row in y..bottom {
-            c.rail(x, row, list_width);
-        }
-        if split {
-            for row in inspector_y..bottom {
-                c.rail(detail_x, row, detail_width);
-            }
-        }
-        y = bottom;
         if self.usage.sessions.warnings > 0 {
             for line in wrapped(
                 vec![Line::styled(
                     "Some logs unavailable · cached/partial data · r retry",
                     Style::default().fg(WARNING),
                 )],
-                width.saturating_sub(2),
+                list_width.saturating_sub(2),
             ) {
-                c.content(x, y, width, || line);
+                c.content(x, y, list_width, || line);
                 y += 1;
             }
         }
-        c.bottom(x, y, width);
+        c.bottom(x, y, list_width);
+        if split {
+            // Inspector stays in the viewport while the continuous list scrolls.
+            let mut inspector_y = detail_y.max(c.scroll);
+            c.header(
+                detail_x,
+                inspector_y,
+                detail_width,
+                "SELECTED SESSION",
+                None,
+            );
+            inspector_y += 1;
+            if let Some((_, session)) = selected {
+                for line in session_detail(session, detail_width.saturating_sub(3)) {
+                    c.detail_content(detail_x, inspector_y, detail_width, line);
+                    inspector_y += 1;
+                }
+            }
+            c.bottom(detail_x, inspector_y, detail_width);
+        }
         y + 1
     }
 }
@@ -1665,10 +1602,8 @@ fn control_rows(inner: Rect, page: &UsagePage) -> (Vec<(String, Action, Rect)>, 
     // Actions have their own row; labels never masquerade as buttons.
     let mut groups: Vec<Vec<(String, Action)>> = vec![
         vec![
-            ("Refresh [r]".into(), Action::Refresh),
-            ("Reset [x]".into(), Action::Reset),
-            ("Help [?]".into(), Action::Help),
-            ("Back [Esc/q]".into(), Action::BackQuit),
+            ("Gateway [g]".into(), Action::Source(UsageSource::Gateway)),
+            ("Sessions [g]".into(), Action::Source(UsageSource::Sessions)),
         ],
         std::iter::once(("Agent".into(), Action::DateLabel))
             .chain(
@@ -1712,8 +1647,14 @@ fn control_rows(inner: Rect, page: &UsagePage) -> (Vec<(String, Action, Rect)>, 
             ("Today [t]".into(), Action::Today),
         ]);
     }
-    groups.push(dates);
-    if let Some(provider) = &page.provider {
+    if page.source == UsageSource::Gateway || page.session_follow_range {
+        groups.push(dates);
+    } else {
+        groups.truncate(2);
+    }
+    if page.source == UsageSource::Gateway
+        && let Some(provider) = &page.provider
+    {
         groups.push(vec![
             ("Clear [a]".into(), Action::Clear),
             (
@@ -1721,11 +1662,14 @@ fn control_rows(inner: Rect, page: &UsagePage) -> (Vec<(String, Action, Rect)>, 
                 Action::DateLabel,
             ),
         ]);
-    } else if inner.width >= 100 {
+    } else if inner.width >= 100 && page.source == UsageSource::Gateway {
         groups
             .last_mut()
             .unwrap()
             .push(("All providers".into(), Action::DateLabel));
+    }
+    if page.source == UsageSource::Sessions && page.session_detail {
+        groups.truncate(1);
     }
     if inner.width < 60 {
         for group in &mut groups {
@@ -1757,12 +1701,87 @@ fn control_rows(inner: Rect, page: &UsagePage) -> (Vec<(String, Action, Rect)>, 
                 y += 1;
                 x = inner.x;
             }
+            if y >= inner.bottom().saturating_sub(3) {
+                break;
+            }
             out.push((text, action, Rect::new(x, y, width, 1)));
             x += width;
         }
         y += 1;
     }
-    (out, y.saturating_sub(inner.y))
+    let height = out
+        .iter()
+        .map(|(_, _, r)| r.bottom())
+        .max()
+        .unwrap_or(inner.y)
+        .saturating_sub(inner.y);
+    (out, height)
+}
+
+fn footer_controls(area: Rect, page: &UsagePage) -> Vec<(String, Action, Rect)> {
+    let buttons: Vec<(&str, &str, Action)> = if page.session_searching {
+        vec![
+            ("Done ↵", "Done", Action::SearchDone),
+            ("Clear ^U", "Clear", Action::SearchClear),
+            ("Cancel Esc", "Cancel", Action::SearchCancel),
+        ]
+    } else if page.source == UsageSource::Sessions && page.session_detail {
+        vec![
+            ("Refresh r", "Refresh", Action::Refresh),
+            ("Sessions q", "Back", Action::BackQuit),
+        ]
+    } else if page.source == UsageSource::Sessions {
+        vec![
+            ("Search /", "Find", Action::Search),
+            ("Open ↵", "Open", Action::Activate(5)),
+            (
+                if page.session_sort_tokens {
+                    "Tokens s"
+                } else {
+                    "Recent s"
+                },
+                "Sort",
+                Action::Sort,
+            ),
+            (
+                if page.session_follow_range {
+                    "Period f"
+                } else {
+                    "All dates f"
+                },
+                "Dates",
+                Action::SessionScope,
+            ),
+            ("Reset x", "x", Action::Reset),
+            ("Refresh r", "r", Action::Refresh),
+            ("Back q", "q", Action::BackQuit),
+        ]
+    } else {
+        vec![
+            ("Refresh r", "Refresh", Action::Refresh),
+            ("Reset x", "Reset", Action::Reset),
+            ("Help ?", "?", Action::Help),
+            ("Back q", "Back", Action::BackQuit),
+        ]
+    };
+    let full: usize = buttons.iter().map(|(label, _, _)| label.width() + 2).sum();
+    let compact = full > usize::from(area.width);
+    let mut x = area.x;
+    let mut out = vec![];
+    for (full, short, action) in buttons {
+        let label = if compact { short } else { full };
+        let width = (label.width() as u16 + 2).min(area.right().saturating_sub(x));
+        if width == 0 {
+            break;
+        }
+        out.push((
+            label.into(),
+            action,
+            Rect::new(x, area.y, width, area.height.min(1)),
+        ));
+        x += width;
+    }
+    out
 }
 
 fn control_line(
@@ -1789,7 +1808,7 @@ fn control_line(
         match action {
             Action::Client(_) | Action::Previous | Action::Next => Color::White,
             Action::Refresh => CONNECTED,
-            Action::Reset | Action::SessionClear => MUTED,
+            Action::Reset => MUTED,
             Action::BackQuit => FIELD_LABEL,
             Action::Help => ROUTE,
             Action::Range(_) => FIELD_LABEL,
@@ -1806,10 +1825,13 @@ impl App {
         area: Rect,
         page: &UsagePage,
     ) {
-        let title = page
-            .provider
-            .as_ref()
-            .map_or(" Usage ".into(), |provider| format!(" Usage / {provider} "));
+        let title = if page.source == UsageSource::Sessions {
+            " Usage / Sessions ".into()
+        } else {
+            page.provider
+                .as_ref()
+                .map_or(" Usage ".into(), |provider| format!(" Usage / {provider} "))
+        };
         frame.render_widget(panel(&title, true), area);
         let mut inner = panel_inner(area);
         if inner.width >= 60 {
@@ -1825,12 +1847,20 @@ impl App {
                 .min()
                 .unwrap_or(inner.right());
             frame.render_widget(
-                Paragraph::new(Line::from(vec![value("GATEWAY FILTERS", FIELD_LABEL)])),
+                Paragraph::new(Line::from(vec![value(
+                    if page.source == UsageSource::Gateway {
+                        "GATEWAY"
+                    } else {
+                        "SESSIONS"
+                    },
+                    FIELD_LABEL,
+                )])),
                 Rect::new(inner.x, inner.y, action_x.saturating_sub(inner.x + 2), 1),
             );
         }
         for (text, action, rect) in &controls {
             let selected = match action {
+                Action::Source(source) => page.source == *source,
                 Action::Client(client) => page.client == *client,
                 Action::Range(range) => page.range == *range,
                 _ => false,
@@ -1843,12 +1873,19 @@ impl App {
                 *rect,
             );
         }
-        let footer = Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1);
+        let footer_height = if inner.height >= 16 { 2 } else { 1 };
+        let footer = Rect::new(
+            inner.x,
+            inner.bottom().saturating_sub(footer_height),
+            inner.width,
+            1,
+        );
+        let footer_buttons = footer_controls(footer, page);
         let viewport = Rect::new(
             inner.x,
             inner.y + height,
             inner.width.saturating_sub(1),
-            inner.height.saturating_sub(height + 1),
+            inner.height.saturating_sub(height + footer_height),
         );
         let d = Data {
             providers: self.usage_providers(page),
@@ -1876,7 +1913,13 @@ impl App {
         };
         let mut state = page.dashboard.borrow_mut();
         state.viewport = viewport;
-        state.controls = controls.into_iter().map(|(_, a, r)| (r, a)).collect();
+        state.effective_scroll = page.scroll;
+        state.controls = controls
+            .into_iter()
+            .chain(footer_buttons.iter().cloned())
+            .filter(|(_, a, _)| !matches!(a, Action::Activate(5)) || !d.sessions.is_empty())
+            .map(|(_, a, r)| (r, a))
+            .collect();
         let mut c = Canvas {
             frame: None,
             viewport,
@@ -1889,7 +1932,11 @@ impl App {
         c.state.total_height = content_height;
         let limit = content_height.saturating_sub(usize::from(viewport.height));
         page.limit.set(limit);
-        let mut scroll = page.scroll.min(limit);
+        let mut scroll = if page.source == UsageSource::Sessions && !page.session_detail {
+            c.state.effective_scroll.min(limit)
+        } else {
+            page.scroll.min(limit)
+        };
         if let Some(section) = c.state.jump.take() {
             scroll = c.state.anchors[section].min(limit);
         }
@@ -1900,10 +1947,6 @@ impl App {
                 .saturating_sub(usize::from(viewport.height.saturating_sub(1)).min(2))
                 .min(limit);
         }
-        if c.state.inspect_session {
-            scroll = c.state.session_detail_y.min(limit);
-            c.state.inspect_session = false;
-        }
         // Save the effective offset through interior state; key/mouse events read it before scrolling.
         c.state.effective_scroll = scroll;
         c.scroll = scroll;
@@ -1911,45 +1954,48 @@ impl App {
         self.dashboard_content(&mut c, page, &d);
         // End the canvas borrow before rendering the footer.
         let _ = c;
-        let status = if self.usage.error.is_some() {
-            "STALE · cached gateway data · r retry".into()
-        } else if self.usage.updated.is_none() {
-            if self.usage.snapshot.rows.is_empty() {
-                "Reading gateway · local sessions independent".into()
+        for (text, action, rect) in footer_buttons {
+            frame.render_widget(
+                Paragraph::new(control_line(
+                    &text,
+                    action,
+                    false,
+                    matches!(action, Action::Activate(5)) && d.sessions.is_empty(),
+                    self.theme,
+                )),
+                rect,
+            );
+        }
+        if footer_height == 2 {
+            let status = if page.session_searching {
+                "Title / project / ID / model · Enter confirm · Esc cancel".into()
+            } else if page.source == UsageSource::Sessions {
+                if self.usage.sessions.warnings > 0 {
+                    "STALE / partial logs · cached sessions · r retry".into()
+                } else {
+                    format!(
+                        "{} · lifetime tokens / {}s",
+                        if page.session_detail {
+                            "↑↓ / wheel scroll details"
+                        } else {
+                            "↑↓ select · wheel scroll · Enter details"
+                        },
+                        self.config.usage_refresh_secs
+                    )
+                }
+            } else if self.usage.error.is_some() {
+                "STALE · cached gateway data · r retry".into()
             } else {
-                "Refreshing gateway · showing cached data".into()
-            }
-        } else {
-            let refreshed = self.usage.updated.map_or("—".into(), |updated| {
-                let zone = chrono::FixedOffset::east_opt(self.usage.snapshot.offset)
-                    .unwrap_or_else(|| chrono::FixedOffset::east_opt(0).unwrap());
-                (chrono::Utc::now()
-                    - chrono::Duration::from_std(updated.elapsed()).unwrap_or_default())
-                .with_timezone(&zone)
-                .format("%H:%M:%S UTC%:z")
-                .to_string()
-            });
-            if inner.width >= 100 {
                 format!(
-                    "↑↓ scroll · 1–6 / Tab sections · n/p select · Enter filter · / sessions · {refreshed}",
-                )
-            } else if inner.width >= 60 {
-                format!(
-                    "↑↓ scroll · Tab sections · n/p select · / search · Esc back / {}s",
+                    "↑↓ scroll · Tab sections · n/p select · Enter filter / {}s",
                     self.config.usage_refresh_secs
                 )
-            } else {
-                "↑↓ scroll · Tab jump · Esc back".into()
-            }
-        };
-        frame.render_widget(
-            Paragraph::new(status).style(Style::default().fg(if self.usage.error.is_some() {
-                WARNING
-            } else {
-                MUTED
-            })),
-            footer,
-        );
+            };
+            frame.render_widget(
+                Paragraph::new(status).style(Style::default().fg(MUTED)),
+                Rect::new(inner.x, inner.bottom().saturating_sub(1), inner.width, 1),
+            );
+        }
         if limit > 0 && viewport.height > 0 {
             let mut scrollbar_state =
                 scroll_state(content_height, scroll, usize::from(viewport.height));
@@ -1974,9 +2020,12 @@ impl App {
                 .position(|(id, _)| Some(id) == state.selected[page.section].as_ref())
                 .unwrap_or(0)
         };
-        if page.section == 5 {
-            if !self.session_rows(page).is_empty() {
-                page.dashboard.borrow_mut().inspect_session = true;
+        if page.source == UsageSource::Sessions && page.section == 5 {
+            if !page.session_detail && !self.session_rows(page).is_empty() {
+                page.detail_return_scroll = page.dashboard.borrow().effective_scroll;
+                page.session_detail = true;
+                page.scroll = 0;
+                page.dashboard.borrow_mut().effective_scroll = 0;
             }
         } else if page.section == 0 {
             if let Some(p) = self.usage_providers(page).get(index) {
@@ -2037,10 +2086,30 @@ impl App {
                         self.usage.page = Some(page);
                         return MouseAction::None;
                     }
-                    if !matches!(action, Action::Search | Action::DateLabel) {
-                        page.session_searching = false;
+                    if page.session_searching
+                        && !matches!(
+                            action,
+                            Action::Search
+                                | Action::DateLabel
+                                | Action::SearchDone
+                                | Action::SearchCancel
+                                | Action::SearchClear
+                        )
+                    {
+                        page.finish_search(false);
                     }
                     match action {
+                        Action::Source(source) => {
+                            if page.source != source {
+                                page.switch_source();
+                            }
+                        }
+                        Action::SearchDone => page.finish_search(false),
+                        Action::SearchCancel => page.finish_search(true),
+                        Action::SearchClear => {
+                            page.session_search.clear();
+                            page.scroll = 0;
+                        }
                         Action::Activate(section) => {
                             page.section = section;
                             self.usage_enter(
@@ -2056,27 +2125,11 @@ impl App {
                             );
                         }
                         Action::Search => {
-                            page.session_searching = true;
-                            page.section = 5;
-                            page.jump_to_section();
+                            page.begin_search();
                         }
                         Action::SessionScope => {
                             page.session_follow_range = !page.session_follow_range;
                             page.section = 5;
-                            page.jump_to_section();
-                        }
-                        Action::SessionClear => {
-                            page.session_search.clear();
-                            page.session_searching = false;
-                            page.session_follow_range = false;
-                            page.section = 5;
-                            page.jump_to_section();
-                        }
-                        Action::SessionPrevious | Action::SessionNext => {
-                            page.section = 5;
-                            for _ in 0..8 {
-                                page.select_table_row(matches!(action, Action::SessionNext));
-                            }
                             page.jump_to_section();
                         }
                         Action::Sort => page.session_sort_tokens = !page.session_sort_tokens,
@@ -2098,7 +2151,12 @@ impl App {
                             self.usage.sessions_updated = None;
                         }
                         Action::Help => help = true,
-                        Action::BackQuit => close = true,
+                        Action::BackQuit => {
+                            close = page.key(
+                                KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
+                                &self.usage.snapshot,
+                            );
+                        }
                         Action::Previous | Action::Next | Action::Today => {
                             page.key(
                                 KeyEvent::new(
@@ -2127,7 +2185,6 @@ impl App {
                     // section navigation and keyboard actions request scrolling.
                     state.reveal = None;
                     state.jump = None;
-                    state.inspect_session = false;
                     drop(state);
                     page.section = section;
                 }
@@ -2282,7 +2339,19 @@ mod tests {
         app.usage.updated = None;
         render(&mut app, 80, 24, "loading");
         key(&mut app, KeyCode::Char('6'));
-        assert!(app.usage.page.as_ref().unwrap().provider.is_some());
+        assert!(app.usage.page.as_ref().unwrap().provider.is_none());
+        assert_eq!(
+            app.usage
+                .page
+                .as_ref()
+                .unwrap()
+                .inactive
+                .as_ref()
+                .unwrap()
+                .provider
+                .as_deref(),
+            Some("unrelated-gateway")
+        );
         let before = render(&mut app, 80, 24, "sessions");
         assert!(text(&before).contains("local-se"));
         assert!(text(&before).contains("1,020"));
@@ -2357,6 +2426,7 @@ mod tests {
             let (_temp, mut app) = fixture();
             app.theme = theme;
             for (width, height) in [(40, 12), (80, 24), (120, 36), (160, 48)] {
+                key(&mut app, KeyCode::Char('1'));
                 key(&mut app, KeyCode::Home);
                 render(&mut app, width, height, "top");
                 {
@@ -2373,14 +2443,15 @@ mod tests {
                             .count(),
                         5
                     );
-                    assert_eq!(
-                        state
-                            .controls
-                            .iter()
-                            .filter(|(_, a)| matches!(a, Action::Range(_)))
-                            .count(),
-                        4
-                    );
+                    let ranges = state
+                        .controls
+                        .iter()
+                        .filter(|(_, a)| matches!(a, Action::Range(_)))
+                        .count();
+                    if height >= 24 {
+                        assert_eq!(ranges, 4);
+                    }
+                    assert!(ranges <= 4);
                     assert!(state.viewport.height > 0);
                 }
                 for section in ['1', '2', '3', '4', '5', '6'] {
@@ -2425,5 +2496,189 @@ mod tests {
                 }
             }
         }
+    }
+    #[test]
+    fn views_restore_filters_and_search_cancel_restores_selection() {
+        let (_temp, mut app) = fixture();
+        app.usage.sessions.rows[1].title = Some("中文 Session 标题".into());
+        let page = app.usage.page.as_mut().unwrap();
+        page.provider = Some("fixture".into());
+        page.client = 1;
+        page.range = 2;
+        let gateway_query = app.usage_query();
+        key(&mut app, KeyCode::Char('g'));
+        app.usage.page.as_mut().unwrap().range = 1;
+        assert_eq!(app.usage_query(), gateway_query);
+        render(&mut app, 120, 36, "independent");
+        assert_eq!(app.usage.page.as_ref().unwrap().client, 0);
+        key(&mut app, KeyCode::Down);
+        render(&mut app, 120, 36, "selected-b");
+        let selected = app.usage.page.as_ref().unwrap().dashboard.borrow().selected[5].clone();
+        key(&mut app, KeyCode::Char('/'));
+        for ch in "中文 Session".chars() {
+            key(&mut app, KeyCode::Char(ch));
+        }
+        render(&mut app, 120, 36, "title-search");
+        assert_eq!(app.session_rows(app.usage.page.as_ref().unwrap()).len(), 1);
+        key(&mut app, KeyCode::Char('q'));
+        assert!(app.usage.active);
+        key(&mut app, KeyCode::Esc);
+        render(&mut app, 120, 36, "cancel-search");
+        assert_eq!(app.usage.page.as_ref().unwrap().session_search, "");
+        assert_eq!(
+            app.usage.page.as_ref().unwrap().dashboard.borrow().selected[5],
+            selected
+        );
+        key(&mut app, KeyCode::Char('g'));
+        let page = app.usage.page.as_ref().unwrap();
+        assert_eq!(page.provider.as_deref(), Some("fixture"));
+        assert_eq!(page.client, 1);
+        assert_eq!(page.range, 2);
+        key(&mut app, KeyCode::Char('g'));
+        render(&mut app, 120, 36, "restore-sessions");
+        assert_eq!(
+            app.usage.page.as_ref().unwrap().dashboard.borrow().selected[5],
+            selected
+        );
+    }
+
+    #[test]
+    fn continuous_sessions_keep_identity_and_return_from_details() {
+        let (_temp, mut app) = fixture();
+        for index in 0..30 {
+            let mut session = app.usage.sessions.rows[0].clone();
+            session.id = format!("session-{index}");
+            session.title = Some(format!("会话 {index}"));
+            session.updated -= index + 100;
+            app.usage.sessions.rows.push(session);
+        }
+        key(&mut app, KeyCode::Char('6'));
+        render(&mut app, 80, 24, "continuous");
+        assert_eq!(
+            app.usage.page.as_ref().unwrap().dashboard.borrow().rows[5].len(),
+            32
+        );
+        key(&mut app, KeyCode::End);
+        render(&mut app, 80, 24, "last");
+        let page = app.usage.page.as_ref().unwrap();
+        let position = page.dashboard.borrow().effective_scroll;
+        let selected = page.dashboard.borrow().selected[5].clone();
+        assert!(position > 0);
+        key(&mut app, KeyCode::Enter);
+        let detail = render(&mut app, 80, 24, "detail");
+        assert!(text(&detail).contains("SESSION DETAILS"));
+        assert!(text(&detail).contains("Title"));
+        key(&mut app, KeyCode::Char('q'));
+        render(&mut app, 80, 24, "return");
+        assert!(app.usage.active);
+        assert_eq!(
+            app.usage
+                .page
+                .as_ref()
+                .unwrap()
+                .dashboard
+                .borrow()
+                .effective_scroll,
+            position
+        );
+        // A different agent with the same ID cannot steal selection.
+        let mut duplicate = app.usage.sessions.rows.last().unwrap().clone();
+        duplicate.client = "Grok";
+        duplicate.updated += 1000;
+        app.usage.sessions.rows.insert(0, duplicate);
+        render(&mut app, 80, 24, "refresh");
+        assert_eq!(
+            app.usage.page.as_ref().unwrap().dashboard.borrow().selected[5],
+            selected
+        );
+        key(&mut app, KeyCode::Char('s'));
+        render(&mut app, 80, 24, "sort");
+        assert_eq!(
+            app.usage.page.as_ref().unwrap().dashboard.borrow().selected[5],
+            selected
+        );
+    }
+
+    #[test]
+    fn contextual_footer_clicks_and_graphite_health_are_real_colors() {
+        let (_temp, mut app) = fixture();
+        app.theme = theme::Theme::Slate;
+        let buffer = render(&mut app, 120, 36, "health");
+        assert!(
+            buffer
+                .content
+                .iter()
+                .any(|c| c.fg == Color::Rgb(133, 212, 162))
+        );
+        assert!(
+            buffer
+                .content
+                .iter()
+                .any(|c| c.fg == Color::Rgb(236, 104, 113))
+        );
+        key(&mut app, KeyCode::Char('6'));
+        render(&mut app, 80, 24, "footer");
+        key(&mut app, KeyCode::Char('/'));
+        key(&mut app, KeyCode::Char('z'));
+        render(&mut app, 80, 24, "search-footer");
+        let rect = app
+            .usage
+            .page
+            .as_ref()
+            .unwrap()
+            .dashboard
+            .borrow()
+            .controls
+            .iter()
+            .find(|(_, a)| matches!(a, Action::SearchCancel))
+            .unwrap()
+            .0;
+        app.usage_mouse(
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: rect.x,
+                row: rect.y,
+                modifiers: KeyModifiers::NONE,
+            },
+            Rect::new(0, 0, 80, 24),
+        );
+        assert!(!app.usage.page.as_ref().unwrap().session_searching);
+        assert!(app.usage.page.as_ref().unwrap().session_search.is_empty());
+    }
+    #[test]
+    fn empty_partial_and_long_titles_are_readable_at_small_sizes() {
+        let (_temp, mut app) = fixture();
+        app.usage.sessions.rows[0].title = Some("长标题会话内容".repeat(40));
+        let lines = session_detail(&app.usage.sessions.rows[0], 34);
+        assert!(lines.iter().all(|line| line.width() <= 34));
+        let content = lines
+            .iter()
+            .map(|line| line.to_string())
+            .collect::<String>();
+        assert!(content.contains(app.usage.sessions.rows[0].title.as_ref().unwrap()));
+        assert!(content.contains("local-session-A"));
+        key(&mut app, KeyCode::Char('6'));
+        app.usage.sessions.rows.clear();
+        app.usage.sessions.warnings = 1;
+        for (width, height) in [(40, 12), (80, 24), (120, 36)] {
+            let buffer = render(&mut app, width, height, "partial");
+            assert!(text(&buffer).contains("No sessions") || text(&buffer).contains("cached"));
+            assert!(
+                !app.usage
+                    .page
+                    .as_ref()
+                    .unwrap()
+                    .dashboard
+                    .borrow()
+                    .controls
+                    .iter()
+                    .any(|(_, action)| matches!(action, Action::Activate(5)))
+            );
+        }
+        app.usage.page.as_mut().unwrap().client = 3;
+        assert!(
+            text(&render(&mut app, 80, 24, "pi-empty"))
+                .contains("Pi local sessions are not supported")
+        );
     }
 }

@@ -13,6 +13,7 @@ mod models;
 mod pi;
 mod preferences;
 mod quick;
+mod session_browser;
 mod settings;
 mod state;
 mod tabs;

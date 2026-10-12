@@ -3021,7 +3021,7 @@ impl GitPane {
         );
         if header_area.width >= 10 {
             frame.render_widget(
-                Paragraph::new("Help").style(Style::default().fg(SOFT).add_modifier(
+                Paragraph::new("?(?)").style(Style::default().fg(SOFT).add_modifier(
                     if self.help_available() {
                         Modifier::empty()
                     } else {
@@ -4739,7 +4739,7 @@ mod tests {
                     });
                 }
                 let text = render(&mut pane, width, 20);
-                assert!(text.contains("Help"));
+                assert!(text.contains("?(?)"));
                 for navigation in [true, false] {
                     assert!(
                         !pane

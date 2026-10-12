@@ -28,16 +28,49 @@ pub(super) struct UsageUi {
     error: Option<String>,
     sessions: crate::sessions::Snapshot,
     sessions_reader: Option<crate::sessions::Reader>,
-    sessions_receiver: Option<mpsc::Receiver<(crate::sessions::Reader, crate::sessions::Snapshot)>>,
+    sessions_receiver:
+        Option<mpsc::Receiver<(crate::sessions::Reader, crate::sessions::Snapshot, bool)>>,
     sessions_updated: Option<Instant>,
+    titles_updated: Option<Instant>,
     sessions_watcher: Option<crate::sessions::ChangeWatch>,
     sessions_events: Option<mpsc::Receiver<()>>,
     sessions_dirty: bool,
     sessions_watch_attempt: Option<Instant>,
 }
 
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub(super) enum UsageSource {
+    #[default]
+    Gateway,
+    Sessions,
+}
+
+#[derive(Clone)]
+struct ViewPosition {
+    day: String,
+    follow_today: bool,
+    range: usize,
+    client: usize,
+    provider: Option<String>,
+    scroll: usize,
+    section: usize,
+    dashboard: view::DashboardState,
+}
+
+#[derive(Clone)]
+struct SearchDraft {
+    query: String,
+    scroll: usize,
+    dashboard: view::DashboardState,
+}
+
 #[derive(Clone)]
 pub(super) struct UsagePage {
+    source: UsageSource,
+    inactive: Option<ViewPosition>,
+    search_draft: Option<SearchDraft>,
+    session_detail: bool,
+    detail_return_scroll: usize,
     day: String,
     follow_today: bool,
     range: usize,
@@ -54,6 +87,73 @@ pub(super) struct UsagePage {
     dashboard: std::cell::RefCell<view::DashboardState>,
 }
 impl UsagePage {
+    fn switch_source(&mut self) {
+        if self.session_searching {
+            self.finish_search(true);
+        }
+        let saved = ViewPosition {
+            day: self.day.clone(),
+            follow_today: self.follow_today,
+            range: self.range,
+            client: self.client,
+            provider: self.provider.clone(),
+            scroll: self.dashboard.borrow().effective_scroll,
+            section: self.section,
+            dashboard: self.dashboard.borrow().clone(),
+        };
+        let next = self.inactive.take().unwrap_or_else(|| ViewPosition {
+            day: self.day.clone(),
+            follow_today: self.follow_today,
+            range: self.range,
+            client: 0,
+            provider: None,
+            scroll: 0,
+            section: 5,
+            dashboard: Default::default(),
+        });
+        self.source = if self.source == UsageSource::Gateway {
+            UsageSource::Sessions
+        } else {
+            UsageSource::Gateway
+        };
+        self.day = next.day;
+        self.follow_today = next.follow_today;
+        self.range = next.range;
+        self.client = next.client;
+        self.provider = next.provider;
+        self.scroll = next.scroll;
+        self.section = next.section;
+        *self.dashboard.borrow_mut() = next.dashboard;
+        self.inactive = Some(saved);
+    }
+    fn begin_search(&mut self) {
+        if self.source == UsageSource::Gateway {
+            self.switch_source();
+        }
+        if self.session_detail {
+            self.session_detail = false;
+            self.scroll = self.detail_return_scroll;
+        }
+        if !self.session_searching {
+            self.search_draft = Some(SearchDraft {
+                query: self.session_search.clone(),
+                scroll: self.scroll,
+                dashboard: self.dashboard.borrow().clone(),
+            });
+        }
+        self.session_searching = true;
+        self.section = 5;
+        self.jump_to_section();
+    }
+    fn finish_search(&mut self, cancel: bool) {
+        if cancel && let Some(draft) = self.search_draft.take() {
+            self.session_search = draft.query;
+            self.scroll = draft.scroll;
+            *self.dashboard.borrow_mut() = draft.dashboard;
+        }
+        self.search_draft = None;
+        self.session_searching = false;
+    }
     fn range_label(&self) -> &'static str {
         ["1 day", "1 week", "1 month", "All time"][self.range]
     }
@@ -112,7 +212,14 @@ impl UsagePage {
                     self.select_table_row(key.code == KeyCode::Down);
                     return false;
                 }
-                KeyCode::Esc | KeyCode::Enter => self.session_searching = false,
+                KeyCode::Esc => {
+                    self.finish_search(true);
+                    return false;
+                }
+                KeyCode::Enter => {
+                    self.finish_search(false);
+                    return false;
+                }
                 KeyCode::Backspace => {
                     self.session_search.pop();
                 }
@@ -132,7 +239,36 @@ impl UsagePage {
             self.jump_to_section();
             return false;
         }
+        if self.source == UsageSource::Sessions
+            && self.session_detail
+            && !matches!(
+                key.code,
+                KeyCode::Char('g' | 'q' | 'r' | 'j' | 'k')
+                    | KeyCode::Esc
+                    | KeyCode::F(6)
+                    | KeyCode::Up
+                    | KeyCode::Down
+                    | KeyCode::PageUp
+                    | KeyCode::PageDown
+                    | KeyCode::Home
+                    | KeyCode::End
+            )
+        {
+            return false;
+        }
         match key.code {
+            KeyCode::Char('g') => {
+                self.switch_source();
+                return false;
+            }
+            KeyCode::Esc | KeyCode::Char('q')
+                if self.source == UsageSource::Sessions && self.session_detail =>
+            {
+                self.session_detail = false;
+                self.scroll = self.detail_return_scroll;
+                self.dashboard.borrow_mut().effective_scroll = self.scroll;
+                return false;
+            }
             KeyCode::Esc | KeyCode::Char('q') | KeyCode::F(6) => return true,
             KeyCode::Left | KeyCode::Right => {
                 if self.range == 3 {
@@ -163,39 +299,48 @@ impl UsagePage {
                 self.scroll = 0;
             }
             KeyCode::Tab | KeyCode::BackTab => {
-                self.section = (self.section + if key.code == KeyCode::Tab { 1 } else { 5 }) % 6;
+                if self.source == UsageSource::Sessions {
+                    return false;
+                }
+                self.section = (self.section + if key.code == KeyCode::Tab { 1 } else { 4 }) % 5;
                 self.jump_to_section();
             }
             KeyCode::Char(c @ '1'..='6') => {
+                if (c == '6') != (self.source == UsageSource::Sessions) {
+                    self.switch_source();
+                }
                 self.section = (c as u8 - b'1') as usize;
                 self.jump_to_section();
             }
             KeyCode::Char('/') => {
-                self.session_searching = true;
-                self.section = 5;
-                self.jump_to_section();
+                self.begin_search();
             }
-            KeyCode::Char('f') => {
+            KeyCode::Char('f') if self.source == UsageSource::Sessions && !self.session_detail => {
                 self.session_follow_range = !self.session_follow_range;
                 self.section = 5;
                 self.jump_to_section();
             }
-            KeyCode::Char('n' | 'p') => self.select_table_row(key.code == KeyCode::Char('n')),
+            KeyCode::Char('n' | 'p')
+                if !self.session_detail || self.source == UsageSource::Gateway =>
+            {
+                self.select_table_row(key.code == KeyCode::Char('n'))
+            }
             KeyCode::Char('x') => {
                 self.client = 0;
                 self.provider = None;
                 self.day = snapshot.today();
                 self.follow_today = true;
                 self.range = 0;
-                self.session_search.clear();
-                self.session_follow_range = false;
-                self.session_sort_tokens = false;
+                if self.source == UsageSource::Sessions {
+                    self.session_search.clear();
+                    self.session_follow_range = false;
+                    self.session_sort_tokens = false;
+                }
                 self.scroll = 0;
             }
-            KeyCode::Char('s') => {
+            KeyCode::Char('s') if self.source == UsageSource::Sessions && !self.session_detail => {
                 self.session_sort_tokens = !self.session_sort_tokens;
                 self.section = 5;
-                self.jump_to_section();
             }
             KeyCode::Char('d' | 'w' | 'm' | 'y') => {
                 self.range = match key.code {
@@ -206,21 +351,44 @@ impl UsagePage {
                 };
                 self.scroll = 0;
             }
-            KeyCode::Char('c' | 'v') => {
+            KeyCode::Char('c' | 'v') if self.source == UsageSource::Gateway => {
                 self.chart_tokens = key.code == KeyCode::Char('v');
                 self.section = 4;
                 self.jump_to_section();
             }
-            KeyCode::Char('a') => {
+            KeyCode::Char('a') if self.source == UsageSource::Gateway => {
                 self.provider = None;
                 self.scroll = 0;
             }
-            KeyCode::Up | KeyCode::Down if key.modifiers.contains(KeyModifiers::ALT) => {
+            KeyCode::Up | KeyCode::Down
+                if key.modifiers.contains(KeyModifiers::ALT)
+                    && !(self.source == UsageSource::Sessions && self.session_detail) =>
+            {
                 self.select_table_row(key.code == KeyCode::Down);
+            }
+            KeyCode::Up | KeyCode::Down | KeyCode::Char('j' | 'k')
+                if self.source == UsageSource::Sessions && !self.session_detail =>
+            {
+                self.select_table_row(matches!(key.code, KeyCode::Down | KeyCode::Char('j')));
             }
             KeyCode::Up | KeyCode::Char('k') => self.scroll = self.scroll.saturating_sub(1),
             KeyCode::Down | KeyCode::Char('j') => {
                 self.scroll = self.scroll.saturating_add(1).min(self.limit.get())
+            }
+            KeyCode::PageUp | KeyCode::PageDown | KeyCode::Home | KeyCode::End
+                if self.source == UsageSource::Sessions && !self.session_detail =>
+            {
+                let count = if matches!(key.code, KeyCode::Home | KeyCode::End) {
+                    self.dashboard.borrow().rows_len(5)
+                } else {
+                    usize::from(self.dashboard.borrow().viewport.height.max(2)) / 2
+                };
+                let count = count.min(isize::MAX as usize) as isize;
+                self.select_table_delta(if matches!(key.code, KeyCode::PageDown | KeyCode::End) {
+                    count
+                } else {
+                    -count
+                });
             }
             KeyCode::PageUp => {
                 self.scroll = self
@@ -246,11 +414,29 @@ impl App {
         if self.usage.active
             && let Some(page) = &self.usage.page
         {
-            match page.start_day() {
-                Some(start) => Query::Range {
-                    start,
-                    end: page.day.clone(),
+            let gateway = if page.source == UsageSource::Sessions {
+                page.inactive.as_ref()
+            } else {
+                None
+            };
+            let (start, end) = gateway.map_or_else(
+                || (page.start_day(), page.day.clone()),
+                |saved| {
+                    let days = match saved.range {
+                        0 => 0,
+                        1 => 6,
+                        2 => 29,
+                        _ => return (None, saved.day.clone()),
+                    };
+                    let start = chrono::NaiveDate::parse_from_str(&saved.day, "%Y-%m-%d")
+                        .ok()
+                        .and_then(|d| d.checked_sub_signed(chrono::Duration::days(days)))
+                        .map(|d| d.to_string());
+                    (start, saved.day.clone())
                 },
+            );
+            match start {
+                Some(start) => Query::Range { start, end },
                 None => Query::All,
             }
         } else {
@@ -288,6 +474,12 @@ impl App {
             && page.follow_today
         {
             page.day = self.usage.snapshot.today();
+        }
+        if let Some(page) = &mut self.usage.page
+            && let Some(saved) = &mut page.inactive
+            && saved.follow_today
+        {
+            saved.day = self.usage.snapshot.today();
         }
         let query = self.usage_query();
         let mut changed = self.usage.query.as_ref() != Some(&query);
@@ -344,7 +536,12 @@ impl App {
 
     fn poll_sessions(&mut self) -> bool {
         let mut changed = false;
-        let showing_sessions = self.usage.active;
+        let showing_sessions = self.usage.active
+            && self
+                .usage
+                .page
+                .as_ref()
+                .is_some_and(|p| p.source == UsageSource::Sessions);
         if !showing_sessions {
             self.usage.sessions_watcher = None;
             self.usage.sessions_events = None;
@@ -384,7 +581,7 @@ impl App {
         }
         if let Some(receiver) = &self.usage.sessions_receiver {
             match receiver.try_recv() {
-                Ok((reader, snapshot)) => {
+                Ok((reader, snapshot, full)) => {
                     self.usage.sessions_reader = Some(reader);
                     if snapshot.rows.is_empty()
                         && snapshot.warnings > 0
@@ -394,7 +591,10 @@ impl App {
                     } else {
                         self.usage.sessions = snapshot;
                     }
-                    self.usage.sessions_updated = Some(Instant::now());
+                    if full {
+                        self.usage.sessions_updated = Some(Instant::now());
+                    }
+                    self.usage.titles_updated = Some(Instant::now());
                     self.usage.sessions_receiver = None;
                     changed = true;
                 }
@@ -408,29 +608,41 @@ impl App {
             }
         }
         let interval = Duration::from_secs(self.config.usage_refresh_secs);
-        if self.usage.sessions_receiver.is_none()
-            && (self
-                .usage
-                .sessions_updated
-                .is_none_or(|t| t.elapsed() >= interval)
-                || (self.usage.sessions_dirty
-                    && self
-                        .usage
-                        .sessions_updated
-                        .is_none_or(|t| t.elapsed() >= Duration::from_secs(1))))
-        {
-            self.usage.sessions_dirty = false;
+        let full = self
+            .usage
+            .sessions_updated
+            .is_none_or(|t| t.elapsed() >= interval)
+            || (self.usage.sessions_dirty
+                && self
+                    .usage
+                    .sessions_updated
+                    .is_none_or(|t| t.elapsed() >= Duration::from_secs(1)));
+        let titles = self
+            .usage
+            .titles_updated
+            .is_none_or(|t| t.elapsed() >= Duration::from_secs(2));
+        if self.usage.sessions_receiver.is_none() && (full || titles) {
+            if full {
+                self.usage.sessions_dirty = false;
+            }
             let (sender, receiver) = mpsc::channel();
             let mut reader = self.usage.sessions_reader.take().unwrap_or_default();
+            let cached = self.usage.sessions.clone();
             std::thread::spawn(move || {
-                let snapshot = match crate::sessions::roots() {
-                    Ok(roots) => reader.read(&roots),
-                    Err(_) => crate::sessions::Snapshot {
-                        rows: vec![],
-                        warnings: 1,
-                    },
+                let snapshot = if full {
+                    match crate::sessions::roots() {
+                        Ok(roots) => reader.read(&roots),
+                        Err(_) => crate::sessions::Snapshot {
+                            rows: vec![],
+                            warnings: 1,
+                        },
+                    }
+                } else {
+                    let mut snapshot = cached;
+                    reader.refresh_titles(&mut snapshot);
+                    snapshot
                 };
-                let _ = sender.send((reader, snapshot));
+                let _ = sender.send((reader, snapshot, full));
             });
             self.usage.sessions_receiver = Some(receiver);
         }
@@ -447,6 +659,11 @@ impl App {
             return;
         }
         self.usage.page = Some(UsagePage {
+            source: UsageSource::Gateway,
+            inactive: None,
+            search_draft: None,
+            session_detail: false,
+            detail_return_scroll: 0,
             day: self.usage.snapshot.today(),
             follow_today: true,
             range: 0,
@@ -479,10 +696,6 @@ impl App {
         }
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             return true;
-        }
-        if !searching && key.code == KeyCode::Char('q') {
-            self.usage.active = false;
-            return false;
         }
         if !searching && key.code == KeyCode::Char('?') {
             self.open_help();

@@ -2,6 +2,8 @@ use super::*;
 
 // Semantic paint tokens. Themes recolor rendered cells without changing their
 // text or hit targets.
+pub(super) const HEALTH_SUCCESS: Color = Color::Rgb(1, 2, 13);
+pub(super) const HEALTH_ERROR: Color = Color::Rgb(1, 2, 12);
 pub(super) const SURFACE: Color = Color::Rgb(1, 2, 3);
 pub(super) const EDGE: Color = Color::Rgb(1, 2, 4);
 pub(super) const ACTIVE_EDGE: Color = Color::Rgb(1, 2, 5);
@@ -173,6 +175,8 @@ impl Theme {
                         DEFAULT_MODEL | DEFAULT_LABEL | DATA_SECONDARY => WARNING,
                         ENABLED => CONNECTED,
                         FIELD_LABEL => MUTED,
+                        HEALTH_SUCCESS => CONNECTED,
+                        HEALTH_ERROR => ERROR,
                         color => color,
                     };
                     if cell.bg == SURFACE {
@@ -182,7 +186,19 @@ impl Theme {
                     }
                     continue;
                 };
-                cell.fg = if matches!(cell.fg, Color::Reset | Color::White)
+                cell.fg = if cell.fg == HEALTH_SUCCESS {
+                    if self == Self::Slate {
+                        rgb(0x85d4a2)
+                    } else {
+                        p.success
+                    }
+                } else if cell.fg == HEALTH_ERROR {
+                    if self == Self::Slate {
+                        rgb(0xec6871)
+                    } else {
+                        p.error
+                    }
+                } else if matches!(cell.fg, Color::Reset | Color::White)
                     && cell.modifier.contains(Modifier::BOLD)
                 {
                     p.heading
@@ -394,6 +410,20 @@ impl PulseTheme {
                     cell.modifier |= Modifier::UNDERLINED;
                 }
                 cell.fg = match cell.fg {
+                    HEALTH_SUCCESS => {
+                        if self == Self::Slate {
+                            rgb(0x85d4a2)
+                        } else {
+                            p.success
+                        }
+                    }
+                    HEALTH_ERROR => {
+                        if self == Self::Slate {
+                            rgb(0xec6871)
+                        } else {
+                            p.error
+                        }
+                    }
                     quick::INK if cell.modifier.contains(Modifier::BOLD) => p.heading,
                     quick::INK => p.text,
                     quick::SOFT => p.label,
@@ -1337,14 +1367,48 @@ pub(super) fn draw_preview(frame: &mut ratatui::Frame, area: Rect, form: &Appear
         inner.width - split - 1,
         12,
     );
-    frame.render_widget(Clear, preview);
-    let body = panel_inner(preview);
+    draw_sample(
+        frame,
+        preview,
+        form.theme,
+        form.pulse_theme,
+        form.pulse_selected,
+    );
     let design = if form.pulse_selected {
         form.pulse_theme.design()
     } else {
         form.theme
     };
-    if form.pulse_selected {
+    if area.height >= 24 {
+        let info = Rect::new(preview.x, preview.bottom() + 1, preview.width, 3);
+        frame.render_widget(Clear, info);
+        frame.render_widget(
+            Paragraph::new(design.description().replace(" · ", "\n"))
+                .style(Style::default().fg(MUTED).bg(SURFACE)),
+            info,
+        );
+        form.theme.apply_region(frame.buffer_mut(), info);
+    }
+}
+
+pub(super) fn draw_sample(
+    frame: &mut ratatui::Frame,
+    preview: Rect,
+    theme: Theme,
+    pulse_theme: PulseTheme,
+    pulse_selected: bool,
+) {
+    if preview.width < 2 || preview.height < 2 {
+        return;
+    }
+    frame.render_widget(Clear, preview);
+    let body = panel_inner(preview);
+    let design = if pulse_selected {
+        pulse_theme.design()
+    } else {
+        theme
+    };
+    if pulse_selected {
         frame.render_widget(
             Block::default()
                 .title(Span::styled(
@@ -1359,7 +1423,7 @@ pub(super) fn draw_preview(frame: &mut ratatui::Frame, area: Rect, form: &Appear
             preview,
         );
         frame.render_widget(Paragraph::new(quick::preview_lines(body.width)), body);
-        form.pulse_theme.apply_region(frame.buffer_mut(), preview);
+        pulse_theme.apply_region(frame.buffer_mut(), preview);
     } else {
         frame.render_widget(panel(" Preview / providers & status ", true), preview);
         let profile = Profile {
@@ -1407,17 +1471,17 @@ pub(super) fn draw_preview(frame: &mut ratatui::Frame, area: Rect, form: &Appear
                 Span::styled(" open", Style::default().fg(MUTED)),
             ]),
         ]);
+        lines.splice(
+            0..0,
+            [
+                Line::styled(" CALL HEALTH", Style::default().fg(FIELD_LABEL)),
+                Line::from(vec![
+                    Span::styled(" ✓ 98 success ", Style::default().fg(HEALTH_SUCCESS)),
+                    Span::styled("× 2 failed", Style::default().fg(HEALTH_ERROR)),
+                ]),
+            ],
+        );
         frame.render_widget(Paragraph::new(lines), body);
         design.apply_region(frame.buffer_mut(), preview);
-    }
-    if area.height >= 24 {
-        let info = Rect::new(preview.x, preview.bottom() + 1, preview.width, 3);
-        frame.render_widget(Clear, info);
-        frame.render_widget(
-            Paragraph::new(design.description().replace(" · ", "\n"))
-                .style(Style::default().fg(MUTED).bg(SURFACE)),
-            info,
-        );
-        form.theme.apply_region(frame.buffer_mut(), info);
     }
 }

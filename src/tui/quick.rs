@@ -1769,7 +1769,7 @@ mod tests {
             let header_text = (0..width)
                 .map(|x| terminal.backend().buffer()[(x, 0)].symbol())
                 .collect::<String>();
-            assert!(header_text.contains("Help"));
+            assert!(header_text.contains("?(?)"));
             let (header, reserve) = pulse_header_area(Rect::new(0, 0, width, height));
             let switch = page_header_rects(header, reserve, false)[1];
             assert!(switch.right() <= pulse_help_rect(header).x);
@@ -1925,8 +1925,8 @@ mod tests {
         };
         let bar = health_meter(&totals, 40);
         assert_eq!(bar.width(), 40);
-        assert_eq!(bar.spans[1].style.fg, Some(GREEN));
-        assert_eq!(bar.spans[2].style.fg, Some(RED));
+        assert_eq!(bar.spans[1].style.fg, Some(super::theme::HEALTH_SUCCESS));
+        assert_eq!(bar.spans[2].style.fg, Some(super::theme::HEALTH_ERROR));
         assert_eq!(bar.spans[3].style.fg, Some(GOLD));
         assert!(!bar.spans[2].content.is_empty());
         assert!(!bar.spans[3].content.is_empty());

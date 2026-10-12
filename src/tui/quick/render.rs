@@ -503,7 +503,7 @@ impl Monitor {
         }
         if area.width >= 10 {
             f.render_widget(
-                Paragraph::new("Help").style(Style::default().fg(SOFT)),
+                Paragraph::new("?(?)").style(Style::default().fg(SOFT)),
                 pulse_help_rect(area),
             );
         }
@@ -1033,10 +1033,12 @@ impl Monitor {
         }
         out.push(section("CALL HEALTH", width));
         let health = rate(t);
-        let color = if t.failed + t.interrupted > 0 {
+        let color = if t.failed > 0 {
+            super::super::theme::HEALTH_ERROR
+        } else if t.interrupted > 0 {
             GOLD
         } else {
-            GREEN
+            super::super::theme::HEALTH_SUCCESS
         };
         out.push(pair(
             "Success rate",
@@ -1053,13 +1055,26 @@ impl Monitor {
                 color,
             )));
         }
-        out.push(line(
-            format!(
-                "✓ {} · × {} · ! {} · ◌ {}",
-                t.success, t.failed, t.interrupted, t.pending
+        out.push(Line::from(vec![
+            Span::styled(
+                format!("✓ {}", t.success),
+                Style::default().fg(if health.is_some() {
+                    super::super::theme::HEALTH_SUCCESS
+                } else {
+                    SOFT
+                }),
             ),
-            INK,
-        ));
+            Span::styled(
+                format!(" · × {}", t.failed),
+                Style::default().fg(if health.is_some() {
+                    super::super::theme::HEALTH_ERROR
+                } else {
+                    SOFT
+                }),
+            ),
+            Span::styled(format!(" · ! {}", t.interrupted), Style::default().fg(GOLD)),
+            Span::styled(format!(" · ◌ {}", t.pending), Style::default().fg(SOFT)),
+        ]));
         out.push(pair("↘ Compaction", m.compact.to_string(), width, SOFT));
         out.push(if self.models {
             section_action("MODELS / TODAY", "[Providers m]", width)
@@ -1124,16 +1139,7 @@ impl Monitor {
                     .is_some_and(|current| s.client == current.client && s.id == current.id)
             };
             active(b).cmp(&active(a)).then_with(|| {
-                if self.sessions_sort_tokens {
-                    b.tokens
-                        .known
-                        .cmp(&a.tokens.known)
-                        .then_with(|| b.tokens.total().cmp(&a.tokens.total()))
-                        .then_with(|| b.updated.cmp(&a.updated))
-                } else {
-                    b.updated.cmp(&a.updated)
-                }
-                .then_with(|| a.id.cmp(&b.id))
+                super::super::session_browser::compare(a, b, self.sessions_sort_tokens)
             })
         });
         rows
@@ -1202,7 +1208,7 @@ impl Monitor {
             Rect::new(inner.right() - 9, inner.y, 4, 1),
         );
         f.render_widget(
-            Paragraph::new("Help").style(Style::default().fg(SOFT)),
+            Paragraph::new("?(?)").style(Style::default().fg(SOFT)),
             pulse_help_rect(inner),
         );
         let tabs = Layout::horizontal([Constraint::Ratio(1, 4); 4]).split(Rect::new(

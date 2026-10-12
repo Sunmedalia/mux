@@ -31,6 +31,13 @@ impl App {
                 form,
             );
         }
+        if let Some(Modal::SettingsMenu(menu)) = &self.modal {
+            settings::draw_theme_preview(
+                frame,
+                modal_area_for(self.modal.as_ref().unwrap(), frame.area()),
+                menu,
+            );
+        }
     }
 
     fn draw_content(&mut self, frame: &mut ratatui::Frame) {
