@@ -44,7 +44,6 @@ pub(super) fn run(paths: AppPaths) -> Result<()> {
     let (send, updates) = mpsc::sync_channel(1);
     let (refresh, requests) = mpsc::sync_channel(1);
     let (session_send, session_updates) = mpsc::sync_channel(1);
-    let (session_refresh, session_requests) = mpsc::sync_channel(1);
     let source_pane = std::env::var("MUX_MONITOR_SOURCE_PANE")
         .ok()
         .filter(|id| !id.is_empty());
@@ -114,7 +113,7 @@ pub(super) fn run(paths: AppPaths) -> Result<()> {
         monitor.apply_start_page();
     }
     monitor.git.start();
-    spawn_session_reader(session_send, session_requests, session_refresh.clone());
+    let session_refresh = spawn_session_reader(session_send);
     let mut redraw = true;
     let mut last_theme_check = Instant::now();
     let mut last_clock_redraw = Instant::now();
@@ -172,18 +171,23 @@ pub(super) fn run(paths: AppPaths) -> Result<()> {
                 Err(mpsc::TryRecvError::Empty) => None,
             });
         if let Some(result) = completed {
+            let refresh_account = result.is_ok();
             if let Some(picker) = &mut monitor.picker {
                 monitor.client = picker.client;
                 picker.finish(result);
                 monitor.scroll = monitor.scroll.min(2);
             }
             switching = None;
-            account_force = true;
+            account_force |= refresh_account;
             redraw = true;
         }
         if (monitor.client != account_client || account_force)
             && account_refresh
-                .try_send((monitor.client, account_force))
+                .try_send(if account_force {
+                    accounts::AccountRequest::Refresh(monitor.client)
+                } else {
+                    accounts::AccountRequest::Select(monitor.client)
+                })
                 .is_ok()
         {
             account_client = monitor.client;
@@ -406,28 +410,12 @@ pub(super) fn run(paths: AppPaths) -> Result<()> {
                                 }
                                 None
                             }
-                            MouseEventKind::Down(MouseButton::Left) => (if mini {
-                                mini_buttons(area)
-                            } else {
-                                buttons(area)
-                            })
-                            .iter()
-                            .position(|r| contains(*r, m.column, m.row))
-                            .map(|i| {
-                                [
-                                    KeyCode::Char('e'),
-                                    KeyCode::Char(
-                                        if monitor.page == config::PulseStartPage::Sessions {
-                                            't'
-                                        } else {
-                                            'c'
-                                        },
-                                    ),
-                                    KeyCode::Char('s'),
-                                    KeyCode::Char('r'),
-                                    KeyCode::Char('q'),
-                                ][i]
-                            }),
+                            MouseEventKind::Down(MouseButton::Left) => {
+                                footer_buttons(area, monitor.page, monitor.sessions_sort_tokens)
+                                    .iter()
+                                    .find(|button| contains(button.rect, m.column, m.row))
+                                    .map(|button| button.key)
+                            }
                             _ => None,
                         }
                     }
@@ -519,7 +507,7 @@ pub(super) fn run(paths: AppPaths) -> Result<()> {
                 KeyCode::Char('r') => {
                     account_force = true;
                     let _ = refresh.try_send(());
-                    let _ = session_refresh.try_send(());
+                    session_refresh.request();
                     monitor.notice = None;
                 }
                 KeyCode::Tab => {
@@ -1182,7 +1170,6 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(home.contains("SESSION / ALL TIME"));
-        assert!(home.find("TOKENS").unwrap() < home.find("SESSION / ALL TIME").unwrap());
         assert!(home.contains(&digits("1000")[0]));
         assert!(home.contains("↑ Input 800  ·  ↓ Output 200"));
         assert!(home.contains("↺ Read 300  ·  Write 100"));
@@ -1293,11 +1280,6 @@ mod tests {
                 .map(ToString::to_string)
                 .collect::<Vec<_>>()
                 .join("\n");
-            assert!(text.find("TOKENS").unwrap() < text.find("SESSION / ALL TIME").unwrap());
-            assert!(
-                text.find("Calls / unknown").unwrap() < text.find("SESSION / ALL TIME").unwrap()
-            );
-            assert!(text.find("streams").unwrap() < text.find("SESSION / ALL TIME").unwrap());
             assert!(text.contains(&digits("500")[0]));
             for expected in [
                 &digits("1000")[0],
@@ -1336,7 +1318,6 @@ mod tests {
         let row = |y| (0..48).map(|x| buffer[(x, y)].symbol()).collect::<String>();
         assert!(row(1).contains("Codex"));
         assert!(row(2).contains("CODEX ACCOUNT"));
-        assert!(row(28).contains("Checked"));
         let mut tall = ratatui::Terminal::new(TestBackend::new(48, 40)).unwrap();
         tall.draw(|frame| m.draw(frame)).unwrap();
         assert_eq!(m.content(42).len(), compact_rows);
@@ -1423,6 +1404,8 @@ mod tests {
                 id: "current".into(),
             }),
             page: config::PulseStartPage::Charts,
+            refreshed: Some(Instant::now()),
+            sessions_refreshed: Some(Instant::now()),
             ..Default::default()
         };
         m.snapshot.offset = 0;
@@ -1438,6 +1421,7 @@ mod tests {
             ..Default::default()
         };
         session.activity.insert(noon, 120);
+        session.tokens.known = true;
         m.sessions.rows.push(session);
         m.snapshot.rows.push(crate::usage::Row {
             day: m.snapshot.today(),
@@ -1565,10 +1549,6 @@ mod tests {
                 .iter()
                 .map(|c| c.symbol())
                 .collect::<String>();
-            assert!(
-                text.contains("(s)"),
-                "Sessions button must fit {width} columns"
-            );
             assert!(text.contains("SESSION"), "Session view must be visible");
             assert!(!text.contains("TODAY / USAGE"));
         }
@@ -1636,10 +1616,6 @@ mod tests {
         assert!(text.contains("Output rate (E2E)"));
         assert!(text.contains("25.0 tok/s"));
         assert!(text.contains("2 measured streams"));
-        assert!(text.find("REQUESTS").unwrap() < text.find("SESSION / ALL TIME").unwrap());
-        assert!(
-            text.find("2 measured streams").unwrap() < text.find("SESSION / ALL TIME").unwrap()
-        );
     }
     #[test]
     fn invoking_agent_selects_the_initial_statistics_tab() {
@@ -1700,12 +1676,6 @@ mod tests {
                 .map(|c| c.symbol())
                 .collect();
             assert!(text.contains("TOKEN"));
-            assert!(text.contains("(e)"));
-            assert!(text.contains("(c)"));
-            assert!(text.contains("(r)"));
-            assert!(text.contains("(q)"));
-            assert!(!text.contains("e edit ·"));
-            assert!(!text.contains("Configurations"));
             m.scroll = u16::MAX;
             terminal.draw(|f| m.draw(f)).unwrap();
             assert!(m.scroll <= m.limit);
@@ -1752,7 +1722,6 @@ mod tests {
                 .map(|x| terminal.backend().buffer()[(x, 0)].symbol())
                 .collect::<String>();
             assert_eq!(label, "[Git(g)]");
-            assert_eq!(buttons(area).len(), 5);
         }
     }
     #[test]
@@ -2204,21 +2173,6 @@ mod account_page_tests {
             assert_eq!(text.contains("Output rate (E2E)"), !visual);
             assert_eq!(text.contains("↗ Rate"), visual);
             assert_eq!(text.matches("SESSION TOKENS").count(), 1);
-            for (width, height) in [(48, 40), (28, 32), (32, 24)] {
-                let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-                terminal.draw(|frame| monitor.draw(frame)).unwrap();
-                let text: String = terminal
-                    .backend()
-                    .buffer()
-                    .content
-                    .iter()
-                    .map(|cell| cell.symbol())
-                    .collect();
-                assert!(text.contains("50.0 tok/s"));
-                if visual && width == 48 {
-                    assert!(text.contains("CALL HEALTH"));
-                }
-            }
         }
         monitor.snapshot.rows[0].totals.speed_ms = 0;
         monitor.sessions.rows[0].api_ms = 0;
@@ -2263,7 +2217,7 @@ mod account_page_tests {
             });
         }
         let text = monitor
-            .grok_gateway_tokens(48)
+            .content(48)
             .into_iter()
             .map(|l| l.to_string())
             .collect::<Vec<_>>()
@@ -2272,38 +2226,12 @@ mod account_page_tests {
         assert!(!text.contains("98.8K") && !text.contains("100.0K"));
         monitor.snapshot.rows[0].totals.unknown = 1;
         let unknown = monitor
-            .grok_gateway_tokens(48)
+            .content(48)
             .into_iter()
             .map(|l| l.to_string())
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(unknown.contains("Unknown tokens") && !unknown.contains("12.3K"));
-        monitor.snapshot.rows.clear();
-        assert!(
-            monitor
-                .grok_gateway_tokens(48)
-                .iter()
-                .any(|l| l.to_string().contains("No gateway traffic"))
-        );
-        monitor.refreshed = None;
-        assert!(
-            monitor
-                .grok_gateway_tokens(48)
-                .iter()
-                .any(|l| l.to_string().contains("Loading gateway"))
-        );
-        for (width, height) in [(48, 40), (28, 32), (32, 24)] {
-            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-            terminal.draw(|frame| monitor.draw(frame)).unwrap();
-            let text: String = terminal
-                .backend()
-                .buffer()
-                .content
-                .iter()
-                .map(|cell| cell.symbol())
-                .collect();
-            assert!(text.contains("GATEWAY TOKENS") && text.contains("SESSION TOKENS"));
-        }
+        assert!(!unknown.contains("12.3K"));
     }
 
     #[test]

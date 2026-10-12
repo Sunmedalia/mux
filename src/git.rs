@@ -6,7 +6,7 @@ use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -56,6 +56,7 @@ pub struct Snapshot {
     pub behind: u64,
     pub files: Vec<File>,
     pub head: Option<String>,
+    pub fetched: Option<SystemTime>,
 }
 #[derive(Clone, Debug)]
 pub struct Commit {
@@ -87,6 +88,7 @@ pub struct Diff {
     pub hunks: Vec<Hunk>,
     pub fingerprint: Vec<u8>,
     pub reason: Option<String>,
+    pub revision: Vec<u8>,
 }
 impl Diff {
     pub fn patch(&self, hunk: usize) -> Result<Vec<u8>> {
@@ -103,6 +105,25 @@ impl Diff {
             .flat_map(|l| l.iter().copied())
             .collect())
     }
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UpstreamConfig {
+    pub remote: Option<String>,
+    pub merge: Vec<String>,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NetworkTarget {
+    pub branch_ref: String,
+    pub head: String,
+    pub upstream: UpstreamConfig,
+    pub remote: String,
+    pub target_ref: String,
+    pub set_upstream: bool,
+}
+#[derive(Clone, Debug)]
+pub enum NetworkIntent {
+    Pull,
+    Push { remote: Option<String> },
 }
 #[derive(Clone, Debug)]
 pub enum Action {
@@ -128,10 +149,8 @@ pub enum Action {
         remote: String,
     },
     Fetch(String),
-    Pull,
-    Push {
-        remote: Option<String>,
-    },
+    Pull(NetworkTarget),
+    Push(NetworkTarget),
 }
 
 fn os(bytes: &[u8]) -> OsString {
@@ -149,9 +168,42 @@ fn args(parts: &[&str]) -> Vec<OsString> {
     parts.iter().map(OsString::from).collect()
 }
 
+struct GitOutput {
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+#[derive(Debug)]
+struct GitFailure {
+    code: Option<i32>,
+    message: String,
+}
+impl std::fmt::Display for GitFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+impl std::error::Error for GitFailure {}
+
+fn operation_text(output: GitOutput) -> String {
+    fn readable(bytes: Vec<u8>) -> String {
+        String::from_utf8(bytes)
+            .unwrap_or_else(|error| String::from_utf8_lossy(error.as_bytes()).into_owned())
+    }
+    match (output.stdout.is_empty(), output.stderr.is_empty()) {
+        (true, _) => readable(output.stderr),
+        (_, true) => readable(output.stdout),
+        _ => format!(
+            "stdout:\n{}\nstderr:\n{}",
+            readable(output.stdout),
+            readable(output.stderr)
+        ),
+    }
+}
+
 // Drain both pipes concurrently, including hooks and network commands. No command
 // can hold the UI thread or wait for a terminal password prompt.
-fn run(root: &Path, parts: Vec<OsString>, input: Option<Vec<u8>>) -> Result<Vec<u8>> {
+fn run(root: &Path, parts: Vec<OsString>, input: Option<Vec<u8>>) -> Result<GitOutput> {
     let mut command = Command::new("git");
     command
         .arg("--no-pager")
@@ -283,12 +335,18 @@ fn run(root: &Path, parts: Vec<OsString>, input: Option<Vec<u8>>) -> Result<Vec<
         stdout.len() < 16 * 1024 * 1024,
         "Git output is too large; narrow the selection"
     );
-    ensure!(
-        status.success(),
-        "{}",
-        String::from_utf8_lossy(if stderr.is_empty() { &stdout } else { &stderr }).trim()
-    );
-    Ok(stdout)
+    if stderr.len() == 16 * 1024 * 1024 {
+        stderr.extend_from_slice(b"\nstderr reached the 16 MiB output limit\n");
+    }
+    let output = GitOutput { stdout, stderr };
+    if !status.success() {
+        return Err(GitFailure {
+            code: status.code(),
+            message: operation_text(output).trim().into(),
+        }
+        .into());
+    }
+    Ok(output)
 }
 fn parts_are_network(command: &Command) -> bool {
     command
@@ -297,7 +355,7 @@ fn parts_are_network(command: &Command) -> bool {
         .is_some_and(|arg| matches!(arg.to_str(), Some("fetch" | "pull" | "push")))
 }
 fn git(root: &Path, parts: &[&str]) -> Result<Vec<u8>> {
-    run(root, args(parts), None)
+    Ok(run(root, args(parts), None)?.stdout)
 }
 fn text(root: &Path, parts: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&git(root, parts)?)
@@ -412,6 +470,7 @@ pub fn snapshot(root: &Path) -> Result<Snapshot> {
             parts.push("--cached".into());
         }
         for record in run(root, parts, None)?
+            .stdout
             .split(|b| *b == 0)
             .filter(|r| !r.is_empty())
         {
@@ -478,7 +537,51 @@ pub fn snapshot(root: &Path) -> Result<Snapshot> {
         behind,
         files,
         head,
+        fetched: fetch_time(root),
     })
+}
+// FETCH_HEAD is worktree-specific; asking Git also handles gitfiles and custom layouts.
+fn fetch_time(root: &Path) -> Option<SystemTime> {
+    let path = text(
+        root,
+        &[
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-path",
+            "FETCH_HEAD",
+        ],
+    )
+    .ok()?;
+    std::fs::metadata(path).ok()?.modified().ok()
+}
+
+/// Detect changes cheaply before reloading a potentially large preview. Index
+/// content and HEAD catch external staging and branch changes; metadata catches
+/// edits with identical status and numstat output, including atomic saves.
+pub fn preview_revision(root: &Path, file: &File) -> Result<Vec<u8>> {
+    let mut hash = Sha256::new();
+    hash.update(index_stamp(root)?);
+    hash.update(text(root, &["rev-parse", "--verify", "HEAD"]).unwrap_or_default());
+    for relative in std::iter::once(&file.path).chain(file.old_path.iter()) {
+        let path = root.join(relative);
+        match std::fs::symlink_metadata(&path) {
+            Ok(meta) => {
+                hash.update(format!(
+                    "{:?}:{:?}:{}:{:?}",
+                    meta.modified(),
+                    meta.created(),
+                    meta.len(),
+                    meta.permissions()
+                ));
+                if meta.file_type().is_symlink() {
+                    hash.update(os_bytes(std::fs::read_link(path)?.as_os_str()));
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => hash.update(b"missing"),
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(hash.finalize().to_vec())
 }
 fn fingerprint(root: &Path, file: &File, raw: &[u8]) -> Result<Vec<u8>> {
     let mut hash = Sha256::new();
@@ -525,6 +628,7 @@ fn os_bytes(value: &OsStr) -> Vec<u8> {
     }
 }
 pub fn diff(root: &Path, file: &File) -> Result<Diff> {
+    let revision = preview_revision(root, file)?;
     let raw = if file.untracked() {
         // Read-only preview: never use intent-to-add to inspect untracked content.
         let path = root.join(&file.path);
@@ -544,7 +648,7 @@ pub fn diff(root: &Path, file: &File) -> Result<Diff> {
             bytes
         }
     } else {
-        run(root, diff_args(file, false), None)?
+        run(root, diff_args(file, false), None)?.stdout
     };
     let mut lines: Vec<String> = String::from_utf8_lossy(&raw)
         .lines()
@@ -591,6 +695,10 @@ pub fn diff(root: &Path, file: &File) -> Result<Diff> {
         }
     }
     let fingerprint = fingerprint(root, file, &raw)?;
+    ensure!(
+        revision == preview_revision(root, file)?,
+        "File or index changed while reading Diff; refresh and try again"
+    );
     Ok(Diff {
         file: file.clone(),
         raw,
@@ -598,6 +706,7 @@ pub fn diff(root: &Path, file: &File) -> Result<Diff> {
         hunks,
         fingerprint,
         reason,
+        revision,
     })
 }
 pub fn index_stamp(root: &Path) -> Result<Vec<u8>> {
@@ -630,7 +739,7 @@ pub fn history(root: &Path, page: usize, query: &str) -> Result<History> {
         parts.push(format!("--grep={query}").into());
     }
     parts.extend(args(&["HEAD", "--"]));
-    let output = run(root, parts, None)?;
+    let output = run(root, parts, None)?.stdout;
     for fields in output
         .split(|b| *b == 0)
         .collect::<Vec<_>>()
@@ -701,15 +810,14 @@ pub fn remotes(root: &Path) -> Result<Vec<String>> {
         .map(str::to_owned)
         .collect())
 }
-fn file_command(root: &Path, parts: &[&str], file: &File) -> Result<()> {
+fn file_command(root: &Path, parts: &[&str], file: &File) -> Result<GitOutput> {
     let mut parts = args(parts);
     parts.push("--".into());
     parts.push(file.path.as_os_str().into());
     if let Some(old) = &file.old_path {
         parts.push(old.as_os_str().into());
     }
-    run(root, parts, None)?;
-    Ok(())
+    run(root, parts, None)
 }
 fn check_diff(root: &Path, expected: &Diff) -> Result<()> {
     let current = diff(root, &expected.file)?;
@@ -719,30 +827,138 @@ fn check_diff(root: &Path, expected: &Diff) -> Result<()> {
     );
     Ok(())
 }
+fn optional_config(root: &Path, key: &str, all: bool) -> Result<Option<Vec<u8>>> {
+    match git(
+        root,
+        &[
+            "config",
+            "--null",
+            if all { "--get-all" } else { "--get" },
+            key,
+        ],
+    ) {
+        Ok(mut bytes) => {
+            if bytes.last() == Some(&0) {
+                bytes.pop();
+            }
+            Ok(Some(bytes))
+        }
+        Err(error)
+            if error
+                .downcast_ref::<GitFailure>()
+                .is_some_and(|failure| failure.code == Some(1)) =>
+        {
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn network_identity(root: &Path) -> Result<(String, String, UpstreamConfig)> {
+    let branch_ref = text(root, &["symbolic-ref", "--quiet", "HEAD"])
+        .context("Pull/Push requires a branch with commits")?;
+    let branch = branch_ref
+        .strip_prefix("refs/heads/")
+        .context("Invalid branch ref")?;
+    let head = text(root, &["rev-parse", "--verify", "HEAD"])?;
+    let remote = optional_config(root, &format!("branch.{branch}.remote"), false)?
+        .map(String::from_utf8)
+        .transpose()
+        .context("Invalid upstream remote encoding")?;
+    let merge = optional_config(root, &format!("branch.{branch}.merge"), true)?
+        .map(|bytes| {
+            bytes
+                .split(|byte| *byte == 0)
+                .map(|value| String::from_utf8(value.to_vec()))
+                .collect::<std::result::Result<Vec<_>, _>>()
+        })
+        .transpose()
+        .context("Invalid upstream branch encoding")?
+        .unwrap_or_default();
+    let upstream = UpstreamConfig { remote, merge };
+    ensure!(
+        branch_ref == text(root, &["symbolic-ref", "--quiet", "HEAD"])?
+            && head == text(root, &["rev-parse", "--verify", "HEAD"])?,
+        "Git target changed; reopen Review"
+    );
+    Ok((branch_ref, head, upstream))
+}
+
+pub fn prepare_network(root: &Path, intent: NetworkIntent) -> Result<Action> {
+    let (branch_ref, head, upstream) = network_identity(root)?;
+    let first_remote = match &intent {
+        NetworkIntent::Push { remote } => remote.as_ref(),
+        NetworkIntent::Pull => None,
+    };
+    let (remote, target_ref, set_upstream) = if let Some(remote) = first_remote {
+        ensure!(remotes(root)?.contains(remote), "Remote no longer exists");
+        (remote.clone(), branch_ref.clone(), true)
+    } else {
+        let remote = upstream
+            .remote
+            .as_ref()
+            .context("Set an upstream or select a remote for the first push")?;
+        ensure!(
+            upstream.merge.len() == 1 && upstream.merge[0].starts_with("refs/heads/"),
+            "Pull/Push requires a single upstream branch"
+        );
+        (remote.clone(), upstream.merge[0].clone(), false)
+    };
+    let target = NetworkTarget {
+        branch_ref,
+        head,
+        upstream,
+        remote,
+        target_ref,
+        set_upstream,
+    };
+    Ok(match intent {
+        NetworkIntent::Pull => Action::Pull(target),
+        NetworkIntent::Push { .. } => Action::Push(target),
+    })
+}
+
+fn verify_network(root: &Path, target: &NetworkTarget) -> Result<()> {
+    let identity = network_identity(root).ok();
+    ensure!(
+        identity.as_ref().is_some_and(|(branch, head, upstream)| {
+            branch == &target.branch_ref && head == &target.head && upstream == &target.upstream
+        }) && (!target.set_upstream || remotes(root)?.contains(&target.remote)),
+        "Git target changed; reopen Review"
+    );
+    Ok(())
+}
+
 pub fn perform(root: &Path, action: Action) -> Result<String> {
     let current = snapshot(root)?;
     let mut output = String::new();
     match action {
-        Action::Stage(file) => file_command(root, &["add"], &file)?,
-        Action::Unstage(file) => file_command(
-            root,
-            if current.head.is_some() {
-                &["restore", "--staged"]
-            } else {
-                &["rm", "--cached", "--force"]
-            },
-            &file,
-        )?,
+        Action::Stage(file) => output = operation_text(file_command(root, &["add"], &file)?),
+        Action::Unstage(file) => {
+            output = operation_text(file_command(
+                root,
+                if current.head.is_some() {
+                    &["restore", "--staged"]
+                } else {
+                    &["rm", "--cached", "--force"]
+                },
+                &file,
+            )?)
+        }
         Action::StageAll => {
-            git(root, &["add", "-A", "--", "."])?;
-            output = "Staged all changes".into();
+            output = operation_text(run(root, args(&["add", "-A", "--", "."]), None)?);
         }
         Action::UnstageAll => {
             if current.head.is_some() {
-                git(root, &["restore", "--staged", "--", "."])?;
+                output =
+                    operation_text(run(root, args(&["restore", "--staged", "--", "."]), None)?);
             } else {
                 for file in current.files.iter().filter(|f| f.group == Group::Index) {
-                    file_command(root, &["rm", "--cached", "--force"], file)?;
+                    output.push_str(&operation_text(file_command(
+                        root,
+                        &["rm", "--cached", "--force"],
+                        file,
+                    )?));
                 }
             }
         }
@@ -759,7 +975,11 @@ pub fn perform(root: &Path, action: Action) -> Result<String> {
                 );
                 std::fs::remove_file(root.join(&expected.file.path))?;
             } else {
-                file_command(root, &["restore", "--worktree"], &expected.file)?;
+                output = operation_text(file_command(
+                    root,
+                    &["restore", "--worktree"],
+                    &expected.file,
+                )?);
             }
         }
         Action::Hunk {
@@ -783,7 +1003,7 @@ pub fn perform(root: &Path, action: Action) -> Result<String> {
             let mut check = parts.clone();
             check.push("--check".into());
             run(root, check, Some(patch.clone()))?;
-            run(root, parts, Some(patch))?;
+            output = operation_text(run(root, parts, Some(patch))?);
         }
         Action::Commit {
             message,
@@ -806,93 +1026,67 @@ pub fn perform(root: &Path, action: Action) -> Result<String> {
                 current.head == head && index_stamp(root)? == index,
                 "HEAD or index changed; review staged files and reopen Commit"
             );
-            output = String::from_utf8_lossy(&run(
+            output = operation_text(run(
                 root,
                 args(&["commit", "-F", "-"]),
                 Some(message.into_bytes()),
-            )?)
-            .into();
+            )?);
         }
         Action::Switch(branch) => {
             ensure!(!branch.starts_with('-'), "Invalid branch");
-            output = text(root, &["switch", &branch])?;
+            output = operation_text(run(root, args(&["switch", &branch]), None)?);
         }
         Action::Create(branch) => {
             git(root, &["check-ref-format", "--branch", &branch])?;
-            output = text(root, &["switch", "-c", &branch])?;
+            output = operation_text(run(root, args(&["switch", "-c", &branch]), None)?);
         }
         Action::Track { local, remote } => {
             git(root, &["check-ref-format", "--branch", &local])?;
             ensure!(!remote.starts_with('-'), "Invalid remote branch");
-            output = text(root, &["switch", "-c", &local, "--track", &remote])?;
+            output = operation_text(run(
+                root,
+                args(&["switch", "-c", &local, "--track", &remote]),
+                None,
+            )?);
         }
         Action::Fetch(remote) => {
             ensure!(remotes(root)?.contains(&remote), "Remote no longer exists");
-            output = text(root, &["fetch", "--", &remote])?;
+            output = operation_text(run(root, args(&["fetch", "--", &remote]), None)?);
         }
-        Action::Pull => {
-            ensure!(
-                current.upstream.is_some(),
-                "Set an upstream branch before pulling"
-            );
+        Action::Pull(target) => {
+            verify_network(root, &target)?;
             ensure!(
                 current.files.is_empty(),
                 "Commit or discard local changes before pulling"
             );
-            output = text(root, &["pull", "--ff-only", "--no-autostash"])?;
+            output = operation_text(run(
+                root,
+                args(&[
+                    "pull",
+                    "--ff-only",
+                    "--no-autostash",
+                    "--",
+                    &target.remote,
+                    &target.target_ref,
+                ]),
+                None,
+            )?);
         }
-        Action::Push { remote } => {
-            ensure!(
-                current.head.is_some() && !current.branch.starts_with("detached "),
-                "Push requires a branch with commits"
-            );
-            output = if let Some(remote) = remote {
-                ensure!(remotes(root)?.contains(&remote), "Remote no longer exists");
-                text(
-                    root,
-                    &[
-                        "push",
-                        "--set-upstream",
-                        "--",
-                        &remote,
-                        &format!("HEAD:refs/heads/{}", current.branch),
-                    ],
-                )?
-            } else {
-                ensure!(
-                    current.upstream.is_some(),
-                    "Select a remote for the first push"
-                );
-                let remote = text(
-                    root,
-                    &[
-                        "config",
-                        "--get",
-                        &format!("branch.{}.remote", current.branch),
-                    ],
-                )?;
-                let target = text(
-                    root,
-                    &[
-                        "config",
-                        "--get",
-                        &format!("branch.{}.merge", current.branch),
-                    ],
-                )?;
-                ensure!(
-                    target.starts_with("refs/heads/"),
-                    "Upstream must be a branch"
-                );
-                // Explicit refspecs prevent push.default=matching or remote.push
-                // from silently pushing additional branches.
-                text(root, &["push", "--", &remote, &format!("HEAD:{target}")])?
-            };
+        Action::Push(target) => {
+            verify_network(root, &target)?;
+            let refspec = format!("{}:{}", target.branch_ref, target.target_ref);
+            let mut parts = vec!["push"];
+            if target.set_upstream {
+                parts.push("--set-upstream");
+            }
+            parts.extend(["--", &target.remote, &refspec]);
+            output = operation_text(run(root, args(&parts), None)?);
         }
     }
     Ok(if output.trim().is_empty() {
         "Git operation completed".into()
     } else {
-        output.trim().into()
+        output
     })
 }
 
@@ -946,10 +1140,7 @@ mod tests {
         std::fs::remove_file(root.join("deleted")).unwrap();
         std::fs::create_dir(root.join("sub")).unwrap();
         write(root, "sub/new", "new\n");
-        assert_eq!(
-            perform(root, Action::StageAll).unwrap(),
-            "Staged all changes"
-        );
+        perform(root, Action::StageAll).unwrap();
         let s = snapshot(root).unwrap();
         assert_eq!(s.files.len(), 3);
         assert!(s.files.iter().all(|file| file.group == Group::Index));
@@ -1290,9 +1481,13 @@ mod tests {
         .unwrap();
         perform(
             root,
-            Action::Push {
-                remote: Some("origin".into()),
-            },
+            prepare_network(
+                root,
+                NetworkIntent::Push {
+                    remote: Some("origin".into()),
+                },
+            )
+            .unwrap(),
         )
         .unwrap();
         assert_eq!(
@@ -1319,7 +1514,7 @@ mod tests {
         git(other.path(), &["push", "origin", "HEAD:main"]).unwrap();
         perform(root, Action::Fetch("origin".into())).unwrap();
         assert_eq!(snapshot(root).unwrap().behind, 1);
-        perform(root, Action::Pull).unwrap();
+        perform(root, prepare_network(root, NetworkIntent::Pull).unwrap()).unwrap();
         assert!(root.join("upstream").exists());
         write(root, "local", "local\n");
         commit(root);
@@ -1327,7 +1522,7 @@ mod tests {
         commit(other.path());
         git(other.path(), &["push", "origin", "HEAD:main"]).unwrap();
         let head = snapshot(root).unwrap().head;
-        assert!(perform(root, Action::Pull).is_err());
+        assert!(perform(root, prepare_network(root, NetworkIntent::Pull).unwrap()).is_err());
         assert_eq!(snapshot(root).unwrap().head, head);
     }
     #[test]
@@ -1339,7 +1534,11 @@ mod tests {
             let root = dir.path();
             write(root, "file", "base\n");
             let hook = root.join(".git/empty-hooks/pre-commit");
-            std::fs::write(&hook, "#!/bin/sh\necho rejected-by-test-hook >&2\nexit 1\n").unwrap();
+            std::fs::write(
+                &hook,
+                "#!/bin/sh\necho stdout-hook\necho rejected-by-test-hook >&2\nexit 1\n",
+            )
+            .unwrap();
             std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
             perform(root, Action::StageAll).unwrap();
             let error = perform(
@@ -1352,6 +1551,7 @@ mod tests {
             )
             .unwrap_err();
             assert!(error.to_string().contains("rejected-by-test-hook"));
+            assert!(error.to_string().contains("stdout-hook"));
             assert!(snapshot(root).unwrap().head.is_none());
         }
     }
@@ -1454,9 +1654,13 @@ mod tests {
         .unwrap();
         perform(
             root,
-            Action::Push {
-                remote: Some("origin".into()),
-            },
+            prepare_network(
+                root,
+                NetworkIntent::Push {
+                    remote: Some("origin".into()),
+                },
+            )
+            .unwrap(),
         )
         .unwrap();
         perform(root, Action::Create("extra".into())).unwrap();
@@ -1466,10 +1670,277 @@ mod tests {
         commit(root);
         perform(root, Action::Switch("main".into())).unwrap();
         git(root, &["config", "push.default", "matching"]).unwrap();
-        perform(root, Action::Push { remote: None }).unwrap();
+        git(
+            root,
+            &["config", "remote.origin.push", "refs/heads/*:refs/heads/*"],
+        )
+        .unwrap();
+        perform(
+            root,
+            prepare_network(root, NetworkIntent::Push { remote: None }).unwrap(),
+        )
+        .unwrap();
         assert_eq!(
             text(remote.path(), &["rev-parse", "refs/heads/extra"]).unwrap(),
             extra
         );
+    }
+    #[test]
+    fn preview_revision_detects_same_numstat_edits_external_staging_and_deletion() {
+        let dir = repo();
+        let root = dir.path();
+        write(root, "tracked", "initial\n");
+        commit(root);
+        write(root, "tracked", "changed\n");
+        let before = file(root, Group::Worktree);
+        let preview = diff(root, &before).unwrap();
+        std::thread::sleep(Duration::from_millis(10));
+        write(root, "tracked", "another\n");
+        let after = file(root, Group::Worktree);
+        assert_eq!(before.stat, after.stat);
+        assert_ne!(preview.revision, preview_revision(root, &before).unwrap());
+        assert!(
+            perform(
+                root,
+                Action::Hunk {
+                    diff: preview,
+                    hunk: 0,
+                    discard: false
+                }
+            )
+            .is_err()
+        );
+        let edited = preview_revision(root, &after).unwrap();
+        git(root, &["add", "tracked"]).unwrap();
+        assert_ne!(edited, preview_revision(root, &after).unwrap());
+        let staged = file(root, Group::Index);
+        let before_delete = preview_revision(root, &staged).unwrap();
+        std::fs::remove_file(root.join("tracked")).unwrap();
+        assert_ne!(before_delete, preview_revision(root, &staged).unwrap());
+    }
+    #[test]
+    fn fetch_record_uses_each_worktrees_git_path_and_missing_record_is_unknown() {
+        let dir = repo();
+        let root = dir.path();
+        write(root, "tracked", "initial\n");
+        commit(root);
+        assert!(snapshot(root).unwrap().fetched.is_none());
+        let base_record = text(
+            root,
+            &[
+                "rev-parse",
+                "--path-format=absolute",
+                "--git-path",
+                "FETCH_HEAD",
+            ],
+        )
+        .unwrap();
+        std::fs::write(&base_record, b"local fetch record").unwrap();
+        let base_time = std::fs::metadata(&base_record).unwrap().modified().unwrap();
+        assert_eq!(snapshot(root).unwrap().fetched, Some(base_time));
+        let work = tempfile::tempdir().unwrap();
+        let worktree = work.path().join("linked");
+        git(
+            root,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "linked",
+                worktree.to_str().unwrap(),
+            ],
+        )
+        .unwrap();
+        assert!(snapshot(&worktree).unwrap().fetched.is_none());
+        let linked_record = text(
+            &worktree,
+            &[
+                "rev-parse",
+                "--path-format=absolute",
+                "--git-path",
+                "FETCH_HEAD",
+            ],
+        )
+        .unwrap();
+        assert_ne!(base_record, linked_record);
+        std::fs::write(&linked_record, b"linked fetch record").unwrap();
+        let linked_time = std::fs::metadata(&linked_record)
+            .unwrap()
+            .modified()
+            .unwrap();
+        assert_eq!(snapshot(&worktree).unwrap().fetched, Some(linked_time));
+        assert_eq!(snapshot(root).unwrap().fetched, Some(base_time));
+    }
+    #[test]
+    fn network_review_rejects_changed_identity_without_mutating_refs() {
+        for change in [
+            "branch",
+            "head",
+            "remote",
+            "merge",
+            "empty_merge",
+            "first_remote",
+        ] {
+            let dir = repo();
+            let root = dir.path();
+            write(root, "file", "base\n");
+            commit(root);
+            let remote = tempfile::tempdir().unwrap();
+            git(remote.path(), &["init", "--bare", "-b", "main"]).unwrap();
+            git(
+                root,
+                &["remote", "add", "origin", remote.path().to_str().unwrap()],
+            )
+            .unwrap();
+            perform(
+                root,
+                prepare_network(
+                    root,
+                    NetworkIntent::Push {
+                        remote: Some("origin".into()),
+                    },
+                )
+                .unwrap(),
+            )
+            .unwrap();
+            let base = text(remote.path(), &["rev-parse", "refs/heads/main"]).unwrap();
+            let push = prepare_network(
+                root,
+                NetworkIntent::Push {
+                    remote: (change == "first_remote").then(|| "origin".into()),
+                },
+            )
+            .unwrap();
+            let pull = prepare_network(root, NetworkIntent::Pull).unwrap();
+            match change {
+                "branch" => {
+                    git(root, &["switch", "-c", "same-head"]).unwrap();
+                }
+                "head" => {
+                    git(root, &["commit", "--allow-empty", "-m", "external"]).unwrap();
+                }
+                "remote" => {
+                    git(root, &["config", "branch.main.remote", "."]).unwrap();
+                }
+                "merge" => {
+                    git(root, &["config", "branch.main.merge", "refs/heads/other"]).unwrap();
+                }
+                "empty_merge" => {
+                    git(root, &["config", "--add", "branch.main.merge", ""]).unwrap();
+                }
+                "first_remote" => {
+                    git(root, &["remote", "remove", "origin"]).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            let head = text(root, &["rev-parse", "HEAD"]).unwrap();
+            let upstream = network_identity(root).unwrap().2;
+            assert!(perform(root, push).is_err(), "{change}");
+            assert!(perform(root, pull).is_err(), "{change}");
+            assert_eq!(text(root, &["rev-parse", "HEAD"]).unwrap(), head);
+            assert_eq!(network_identity(root).unwrap().2, upstream);
+            assert_eq!(
+                text(remote.path(), &["rev-parse", "refs/heads/main"]).unwrap(),
+                base
+            );
+            assert_eq!(
+                std::fs::read_to_string(root.join("file")).unwrap(),
+                "base\n"
+            );
+        }
+    }
+    #[test]
+    fn network_review_rejects_empty_merge_configuration_and_changed_first_push_config() {
+        let dir = repo();
+        let root = dir.path();
+        write(root, "file", "base\n");
+        commit(root);
+        let remote = tempfile::tempdir().unwrap();
+        git(remote.path(), &["init", "--bare", "-b", "main"]).unwrap();
+        git(
+            root,
+            &["remote", "add", "origin", remote.path().to_str().unwrap()],
+        )
+        .unwrap();
+        let push = prepare_network(
+            root,
+            NetworkIntent::Push {
+                remote: Some("origin".into()),
+            },
+        )
+        .unwrap();
+        git(root, &["config", "branch.main.remote", ""]).unwrap();
+        assert!(perform(root, push).is_err());
+        assert!(git(remote.path(), &["rev-parse", "--verify", "refs/heads/main"]).is_err());
+        git(root, &["config", "branch.main.remote", "origin"]).unwrap();
+        git(root, &["config", "--add", "branch.main.merge", ""]).unwrap();
+        git(
+            root,
+            &["config", "--add", "branch.main.merge", "refs/heads/main"],
+        )
+        .unwrap();
+        assert!(prepare_network(root, NetworkIntent::Pull).is_err());
+        assert!(prepare_network(root, NetworkIntent::Push { remote: None }).is_err());
+    }
+
+    #[test]
+    fn local_upstream_and_multiple_merge_configuration() {
+        let dir = repo();
+        let root = dir.path();
+        write(root, "file", "base\n");
+        commit(root);
+        git(root, &["branch", "local-target"]).unwrap();
+        git(root, &["config", "branch.main.remote", "."]).unwrap();
+        git(
+            root,
+            &["config", "branch.main.merge", "refs/heads/local-target"],
+        )
+        .unwrap();
+        perform(root, prepare_network(root, NetworkIntent::Pull).unwrap()).unwrap();
+        git(root, &["commit", "--allow-empty", "-m", "next"]).unwrap();
+        perform(
+            root,
+            prepare_network(root, NetworkIntent::Push { remote: None }).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            text(root, &["rev-parse", "HEAD"]).unwrap(),
+            text(root, &["rev-parse", "local-target"]).unwrap()
+        );
+        git(
+            root,
+            &["config", "--add", "branch.main.merge", "refs/heads/other"],
+        )
+        .unwrap();
+        assert!(prepare_network(root, NetworkIntent::Pull).is_err());
+        assert!(prepare_network(root, NetworkIntent::Push { remote: None }).is_err());
+    }
+    #[cfg(unix)]
+    #[test]
+    fn successful_hook_preserves_both_streams_without_polluting_reads() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = repo();
+        let root = dir.path();
+        write(root, "file", "base\n");
+        let hook = root.join(".git/empty-hooks/pre-commit");
+        std::fs::write(&hook, "#!/bin/sh\necho hook-out\necho hook-err >&2\n").unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        perform(root, Action::StageAll).unwrap();
+        let output = perform(
+            root,
+            Action::Commit {
+                message: "fixture".into(),
+                head: None,
+                index: index_stamp(root).unwrap(),
+            },
+        )
+        .unwrap();
+        assert!(output.contains("hook-out") && output.contains("hook-err"));
+        assert!(snapshot(root).unwrap().files.is_empty());
+        assert_eq!(history(root, 0, "").unwrap().commits[0].subject, "fixture");
+        write(root, "file", "next\n");
+        let diff = diff(root, &file(root, Group::Worktree)).unwrap();
+        assert!(diff.lines.iter().any(|line| line == "+next"));
+        assert!(!diff.lines.iter().any(|line| line.contains("hook-")));
     }
 }

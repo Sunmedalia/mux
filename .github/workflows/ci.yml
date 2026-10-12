@@ -103,6 +103,7 @@ jobs:
       - run: cargo check --locked --target x86_64-pc-windows-msvc --all-targets --all-features
 
   windows-build:
+    if: "!startsWith(github.ref, 'refs/tags/v')"
     needs: [windows-test, windows-msrv]
     runs-on: windows-2022
     timeout-minutes: 20
@@ -150,12 +151,14 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: ${{ matrix.artifact }}.*
+          path: |
+            ${{ matrix.artifact }}.tar.gz
+            ${{ matrix.artifact }}.tar.gz.sha256
           if-no-files-found: error
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [build, windows-build, security-audit, uninstall-safety]
+    needs: [build, windows-test, windows-msrv, security-audit, uninstall-safety]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -177,8 +180,20 @@ jobs:
           notes = pathlib.Path("docs/releases") / f"{tag}.md"
           assert notes.is_file() and notes.read_text().strip(), "Detailed release notes are required"
           PY
-      - uses: actions/download-artifact@v4
+      - name: Download Linux x86_64 release package
+        uses: actions/download-artifact@v4
         with:
+          name: mux-linux-x86_64
+          path: dist
+      - name: Download Linux ARM64 release package
+        uses: actions/download-artifact@v4
+        with:
+          name: mux-linux-arm64
+          path: dist
+      - name: Download macOS ARM64 release package
+        uses: actions/download-artifact@v4
+        with:
+          name: mux-macos-arm64
           path: dist
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
@@ -186,8 +201,11 @@ jobs:
           name: Mux ${{ github.ref_name }}
           body_path: docs/releases/${{ github.ref_name }}.md
           generate_release_notes: false
+          fail_on_unmatched_files: true
           files: |
-            dist/**/*.tar.gz
-            dist/**/*.tar.gz.sha256
-            dist/**/*.zip
-            dist/**/*.zip.sha256
+            dist/mux-linux-x86_64.tar.gz
+            dist/mux-linux-x86_64.tar.gz.sha256
+            dist/mux-linux-arm64.tar.gz
+            dist/mux-linux-arm64.tar.gz.sha256
+            dist/mux-macos-arm64.tar.gz
+            dist/mux-macos-arm64.tar.gz.sha256

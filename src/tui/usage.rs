@@ -30,7 +30,7 @@ pub(super) struct UsageUi {
     sessions_reader: Option<crate::sessions::Reader>,
     sessions_receiver: Option<mpsc::Receiver<(crate::sessions::Reader, crate::sessions::Snapshot)>>,
     sessions_updated: Option<Instant>,
-    sessions_watcher: Option<notify::RecommendedWatcher>,
+    sessions_watcher: Option<crate::sessions::ChangeWatch>,
     sessions_events: Option<mpsc::Receiver<()>>,
     sessions_dirty: bool,
     sessions_watch_attempt: Option<Instant>,
@@ -352,23 +352,34 @@ impl App {
             self.usage.sessions_dirty = true;
             return false;
         }
-        if self.usage.sessions_watcher.is_none()
-            && self
-                .usage
-                .sessions_watch_attempt
-                .is_none_or(|t| t.elapsed() >= Duration::from_secs(2))
-            && let Ok(roots) = crate::sessions::roots()
-        {
-            self.usage.sessions_watch_attempt = Some(Instant::now());
-            let (sender, receiver) = mpsc::sync_channel(1);
-            if let Some(watcher) = crate::sessions::watch_changes(&roots, sender) {
-                self.usage.sessions_watcher = Some(watcher);
-                self.usage.sessions_events = Some(receiver);
-            }
-        }
         if let Some(events) = &self.usage.sessions_events {
             while events.try_recv().is_ok() {
                 self.usage.sessions_dirty = true;
+            }
+        }
+        let watch_interval = if self
+            .usage
+            .sessions_watcher
+            .as_ref()
+            .is_some_and(crate::sessions::ChangeWatch::is_complete)
+        {
+            Duration::from_secs(30)
+        } else {
+            Duration::from_secs(2)
+        };
+        if self
+            .usage
+            .sessions_watch_attempt
+            .is_none_or(|t| t.elapsed() >= watch_interval)
+        {
+            self.usage.sessions_watch_attempt = Some(Instant::now());
+            if let Ok(roots) = crate::sessions::roots() {
+                let (sender, receiver) = mpsc::sync_channel(1);
+                self.usage.sessions_watcher = Some(crate::sessions::watch_changes(&roots, sender));
+                self.usage.sessions_events = Some(receiver);
+            } else {
+                self.usage.sessions_watcher = None;
+                self.usage.sessions_events = None;
             }
         }
         if let Some(receiver) = &self.usage.sessions_receiver {

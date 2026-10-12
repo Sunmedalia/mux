@@ -40,6 +40,11 @@ fn main() {
     if env::args().nth(1).as_deref() != Some("app-server") {
         return;
     }
+    if env::args().nth(2).as_deref() == Some("daemon") {
+        assert_eq!(env::args().nth(3).as_deref(), Some("version"));
+        emit(json!({"status":"stopped"}));
+        return;
+    }
     assert_eq!(
         env::args().skip(1).collect::<Vec<_>>(),
         ["app-server", "--stdio"]

@@ -12,13 +12,31 @@ impl Sandbox {
         fs::write(root.path().join("config.toml"), "version = 2\n[profiles.local]\nname='Local'\nbase_url='https://example.invalid/v1'\napi_format='openai-responses'\ndefault_model='test-model[1m]'\n").unwrap();
         fs::create_dir(root.path().join("codex")).unwrap();
         fs::write(root.path().join("codex/config.toml"), "# Keep my comments\nmodel = 'original-model'\nmodel_reasoning_effort = 'low'\n[features]\nkeep_me = true\n").unwrap();
+        #[cfg(feature = "test-support")]
+        fs::copy(
+            env!("CARGO_BIN_EXE_mux-test-helper"),
+            root.path().join(if cfg!(windows) {
+                "codex-default.exe"
+            } else {
+                "codex-default"
+            }),
+        )
+        .unwrap();
+        #[cfg(all(unix, not(feature = "test-support")))]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let binary = root.path().join("codex-default");
+            fs::write(&binary, "#!/bin/sh\nif [ \"$1 $2 $3\" = 'app-server daemon version' ]; then\n  printf '{\"status\":\"stopped\"}\\n'\n  exit 0\nfi\nprintf 'Unexpected Codex command in isolated test: %s\\n' \"$*\" >&2\nexit 1\n").unwrap();
+            fs::set_permissions(binary, fs::Permissions::from_mode(0o700)).unwrap();
+        }
         Self { root }
     }
     fn home(&self) -> PathBuf {
         self.root.path().join("codex")
     }
     fn command(&self, args: &[&str]) -> Output {
-        support::command(self.root.path())
+        let mut command = support::command(self.root.path());
+        command
             .args(args)
             .env("HOME", self.root.path())
             .env("USERPROFILE", self.root.path())
@@ -28,9 +46,17 @@ impl Sandbox {
             .env("XDG_CACHE_HOME", self.root.path().join("cache"))
             .env("APPDATA", self.root.path().join("roaming"))
             .env("LOCALAPPDATA", self.root.path().join("local"))
-            .env("CLAUDE_CONFIG_DIR", self.root.path().join("claude"))
-            .output()
-            .unwrap()
+            .env("CLAUDE_CONFIG_DIR", self.root.path().join("claude"));
+        #[cfg(any(unix, feature = "test-support"))]
+        command.env(
+            "MUX_CODEX_BIN",
+            self.root.path().join(if cfg!(windows) {
+                "codex-default.exe"
+            } else {
+                "codex-default"
+            }),
+        );
+        command.output().unwrap()
     }
     fn ok(&self, args: &[&str]) -> String {
         let result = self.command(args);

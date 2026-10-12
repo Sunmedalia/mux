@@ -269,6 +269,7 @@ mod tests {
     async fn failures_disconnects_unknown_usage_and_unpolled_bodies() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join(crate::usage::FILE);
+        let writer = crate::usage::Writer::new(path.clone());
         for (body, status, streaming, consume) in [
             ("{}", 429, false, false),
             (
@@ -293,11 +294,7 @@ mod tests {
             ("{}", 200, false, true),
             ("not json", 200, false, true),
         ] {
-            let ticket = Ticket::begin(
-                crate::usage::Writer::new(path.clone()),
-                request("Codex", "p", "generation"),
-            )
-            .await;
+            let ticket = Ticket::begin(writer.clone(), request("Codex", "p", "generation")).await;
             let original: reqwest::Response = axum::http::Response::builder()
                 .status(status)
                 .body(reqwest::Body::from(body))
@@ -320,13 +317,7 @@ mod tests {
             }
         }
         // A connection failure before headers drops the original ticket.
-        drop(
-            Ticket::begin(
-                crate::usage::Writer::new(path.clone()),
-                request("Codex", "p", "generation"),
-            )
-            .await,
-        );
+        drop(Ticket::begin(writer.clone(), request("Codex", "p", "generation")).await);
         let s = settled(&path, 8).await;
         let t = s.total(None, None, None, "generation");
         assert_eq!(

@@ -645,13 +645,14 @@ pub fn uses_subscription(home: &Path, settings: &Settings) -> Result<bool> {
         .and_then(|models| models.get("default"))
         .and_then(Item::as_str);
     let model = native_default.or(settings.preferences.default.as_deref());
-    Ok(!model.is_some_and(|model| {
+    let api_model = model.is_some_and(|model| {
         settings.managed_key(model)
             || doc
                 .get("model")
                 .and_then(|models| models.get(model))
                 .is_some()
-    }) && !(model.is_none() && settings.active_mode == Some(Mode::Api))
+    }) || (model.is_none() && settings.active_mode == Some(Mode::Api));
+    Ok(!api_model
         && doc
             .get("endpoints")
             .and_then(|endpoints| endpoints.get("models_base_url"))

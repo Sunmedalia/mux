@@ -27,7 +27,7 @@ mux migrate --config /path/to/old/config.toml --state-dir /path/to/old/state --c
 - 把 Anthropic Messages 请求转发到 Anthropic、OpenAI Chat Completions 或 Responses 兼容网关。
 - 在 Herdr 常驻侧栏中查看网关与会话用量，并完成 Git Diff、暂存、提交、分支、远端操作和提交历史搜索。
 
-> v0.1.20 新增 Herdr Pulse Git 工作流与 TOKEN / GIT 互斥导航，详细变化见 [发布说明](docs/releases/v0.1.20.md)。Mux 支持 macOS ARM64、Linux x86_64/ARM64 和 Windows x64；Herdr 插件支持 macOS / Linux。Pi 可使用本地 Proxy API；四类客户端的 Provider 都支持单独配置模型目录地址。
+> v0.1.21 改进 Pulse 的 Git 确认安全、提交失败恢复、可信用量展示、窄屏交互和后台刷新，详细变化见 [发布说明](docs/releases/v0.1.21.md)。本次提供 macOS ARM64、Linux x86_64/ARM64 预编译包；Windows 保留源码支持与 CI 验证，不提供本版 Release 二进制。Herdr 插件支持 macOS / Linux。Pi 可使用本地 Proxy API；四类客户端的 Provider 都支持单独配置模型目录地址。
 
 [快速开始](#快速开始) · [快捷键](docs/navigation.md#tui-导航) · [Codex 配置与账号](docs/clients.md#codex-配置与账号) · [Pi Agent 配置](docs/clients.md#pi-agent-配置) · [Grok 配置](docs/clients.md#grok-配置) · [模型参数](docs/clients.md#模型-token-参数) · [同步](docs/clients.md#claude-model-同步) · [端口设置](docs/proxy.md#修改本地代理端口--多系统用户) · [Herdr Pulse](docs/pulse.md#herdr-pulse-常驻监控) · [卸载](docs/operations.md#卸载与配置清理) · [开发与测试](docs/development.md#开发)
 
@@ -92,7 +92,7 @@ mux import --yes
 
 Codex 使用 ChatGPT 账号、Grok 使用 OAuth 原生模型时，TOKEN 首页自动隐藏网关 TOKENS 和 CALL HEALTH，保留账号额度与本地会话 Token；切回 API 网关后恢复显示。文字版、简洁版和窄窗口采用相同规则。
 
-Git 使用固定仓库概览，展示项目、分支、上游和各类更改数量；点击分支名 **⑂ 分支 ▾** 打开分支选择页，选择后确认切换。文件按未暂存、已暂存和冲突分组，组标题带数量。选中行高亮，文件名与目录分层展示，新增 / 删除行数分别用绿 / 红色；长路径可换行并点击选择，短屏自动简化布局。
+Git 使用固定仓库概览，展示项目、分支、上游和各类更改数量；点击分支名 **⑂ 分支 ▾** 打开分支选择页，选择后确认切换。文件按未暂存、已暂存和冲突分组，组标题带数量并可点击折叠。默认每个文件一行，选中项展开完整路径；`/` 实时搜索完整路径。新增 / 删除行数分别用绿 / 红色。`p` 固定或跟随仓库，点击仓库名或按 `i` 查看完整路径及本地 Fetch 记录。
 
 Git 文件分为 Unstaged、Staged 和 Conflicts；部分暂存文件可以同时出现在两个分组中。选择文件后使用：
 
@@ -100,7 +100,8 @@ Git 文件分为 Unstaged、Staged 和 Conflicts；部分暂存文件可以同�
 | --- | --- |
 | 查看当前文件 Diff | Enter / Diff |
 | 暂存当前整个文件 | `s` / Stage file |
-| 暂存仓库全部新增、修改和删除 | `a` / Stage all |
+| 暂存当前 Diff 差异块 | `h` / Stage block |
+| 暂存仓库全部新增、修改和删除 | `a` / `o` → Stage all |
 | 取消暂存当前文件或选中差异块 | `u` / Unstage |
 | 确认后撤销未暂存文件或差异块 | `d` / Discard |
 | 提交暂存内容 | `n` / Commit；Ctrl+Enter 预览确认 |
@@ -109,7 +110,7 @@ Git 文件分为 Unstaged、Staged 和 Conflicts；部分暂存文件可以同�
 | 清空搜索并恢复全部历史 | 搜索框内 Ctrl+U，再按 Enter |
 | 分支、单文件/差异块暂存及 Fetch / Pull / Push | `b` / Branch 或 `o` / Ops |
 
-Diff 默认自动换行，`w` 切换，关闭换行后用左右方向键横向滚动；`,` / `.` 切换文件，`[` / `]` 选择差异块，Esc 返回文件列表。Log 每页 50 条，`,` / `.` 翻页，搜索使用不区分大小写的字面文本匹配。状态和操作结果在底部按钮上方显示，按钮与提示随当前页面变化；返回用量首页只使用顶部 TOKEN 标签。详情页显示返回目标，提交确认页用 Edit 返回草稿；空表单、无匹配项和翻页边界的按钮置灰。Git 帮助按 `?`；完整操作范围、冲突和特殊文件说明见 [Git 侧栏文档](docs/pulse.md#git-侧栏)。
+Diff 会自动刷新外部修改并尽量保持阅读位置；暂存 / 丢弃后继续检查剩余差异块，失败后保留原位置。执行状态展示操作名称与耗时，等待期间可滚动阅读。Diff 默认自动换行，`w` 切换，关闭换行后用左右方向键横向滚动；`,` / `.` 切换文件，`[` / `]` 选择差异块，Esc 返回文件列表。Log 每页 50 条，`,` / `.` 翻页，搜索使用不区分大小写的字面文本匹配。状态和操作结果在底部按钮上方显示，按钮与提示随当前页面变化；返回用量首页只使用顶部 TOKEN 标签。详情页显示返回目标，提交确认页用 Edit 返回草稿；空表单、无匹配项和翻页边界的按钮置灰。Git 帮助按 `?`；完整操作范围、冲突和特殊文件说明见 [Git 侧栏文档](docs/pulse.md#git-侧栏)。
 
 ## 使用文档
 

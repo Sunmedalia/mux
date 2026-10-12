@@ -1,5 +1,14 @@
 use super::*;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SourceStatus {
+    Loading,
+    Ready,
+    Stale,
+    Unavailable,
+    Partial,
+}
+
 impl Monitor {
     fn subscription_mode(&self) -> bool {
         match self.client {
@@ -7,6 +16,91 @@ impl Monitor {
             2 => self.accounts.grok.subscription,
             _ => false,
         }
+    }
+    fn gateway_status(&self) -> SourceStatus {
+        match (self.error.is_some(), self.refreshed.is_some()) {
+            (true, true) => SourceStatus::Stale,
+            (true, false) => SourceStatus::Unavailable,
+            (false, false) => SourceStatus::Loading,
+            (false, true) => SourceStatus::Ready,
+        }
+    }
+    fn session_status(&self) -> SourceStatus {
+        if self.sessions.warnings > 0 {
+            if self.sessions.rows.is_empty() {
+                SourceStatus::Unavailable
+            } else {
+                SourceStatus::Partial
+            }
+        } else if self.sessions_refreshed.is_none() {
+            SourceStatus::Loading
+        } else {
+            SourceStatus::Ready
+        }
+    }
+    fn gateway_placeholder(&self) -> Option<(&'static str, Color)> {
+        match self.gateway_status() {
+            SourceStatus::Loading => Some(("Reading gateway usage…", SOFT)),
+            SourceStatus::Unavailable => Some(("Gateway unavailable · r retry", RED)),
+            _ => None,
+        }
+    }
+    fn page_status(&self) -> (String, Color) {
+        let charts = self.page == config::PulseStartPage::Charts;
+        let sessions = self.page == config::PulseStartPage::Sessions;
+        let gateway =
+            (!sessions && (charts || !self.subscription_mode())).then(|| self.gateway_status());
+        let local = (charts || sessions || self.client == 2 || self.source_pane.is_some())
+            .then(|| self.session_status());
+        let mut errors = String::new();
+        let mut color = SOFT;
+        for (name, state) in [("GW", gateway), ("Sessions", local)] {
+            let label = match state {
+                Some(SourceStatus::Stale) => "stale",
+                Some(SourceStatus::Unavailable) => "unavailable",
+                Some(SourceStatus::Partial) => "partial",
+                _ => continue,
+            };
+            if !errors.is_empty() {
+                errors.push_str(" · ");
+            }
+            errors.push_str(name);
+            errors.push(' ');
+            errors.push_str(label);
+            if state == Some(SourceStatus::Partial) {
+                if color != RED {
+                    color = GOLD;
+                }
+            } else {
+                color = RED;
+            }
+        }
+        if !errors.is_empty() {
+            return (format!("! {errors} · r retry"), color);
+        }
+        if gateway == Some(SourceStatus::Loading) {
+            return ("Reading gateway usage…".into(), SOFT);
+        }
+        if local == Some(SourceStatus::Loading) {
+            return ("Reading local sessions…".into(), SOFT);
+        }
+        if let Some(notice) = &self.notice {
+            return (notice.clone(), SOFT);
+        }
+        let text = if sessions {
+            self.sessions_refreshed
+                .map_or("Reading local sessions…".into(), |time| {
+                    format!(
+                        "● Sessions updated {}s ago · on change",
+                        time.elapsed().as_secs()
+                    )
+                })
+        } else if charts {
+            "● Charts auto-update · c: Home".into()
+        } else {
+            "● Auto-update · r refresh".into()
+        };
+        (text, SOFT)
     }
     pub(super) fn header_switch_rect(&self, area: Rect, mini: bool) -> Rect {
         page_header_rects(
@@ -179,93 +273,6 @@ impl Monitor {
         }
         out
     }
-    pub(super) fn grok_gateway_tokens(&self, width: u16) -> Vec<Line<'static>> {
-        if !self.visual_mode {
-            let mut out = self.stats_content(width);
-            if let Some(title) = out.first_mut() {
-                *title = section_meta("GATEWAY TOKENS", &self.snapshot.today(), width);
-            }
-            if self.refreshed.is_some() && metrics(&self.snapshot, Some("Grok")).total.calls == 0 {
-                out.push(line(
-                    "Use a Mux API model via /model to record Gateway usage",
-                    SOFT,
-                ));
-            }
-            return out;
-        }
-        let totals = metrics(&self.snapshot, Some("Grok")).total;
-        let ready = self.refreshed.is_some();
-        let unknown = !ready || (totals.calls > 0 && totals.unknown == totals.calls);
-        let value = if unknown {
-            "—".into()
-        } else {
-            short(totals.input + totals.output)
-        };
-        let mut out = vec![section_meta(
-            "GATEWAY TOKENS",
-            &self.snapshot.today(),
-            width,
-        )];
-        out.extend(if width < 30 {
-            mini_token_total(&value, width, BLUE)
-        } else {
-            token_digits(&value, BLUE)
-        });
-        let input = if unknown {
-            "—".into()
-        } else {
-            short(totals.input)
-        };
-        let output = if unknown {
-            "—".into()
-        } else {
-            short(totals.output)
-        };
-        out.push(duo_line(
-            width,
-            ("↑ Input", "↑", &input, BLUE),
-            ("↓ Output", "↓", &output, METRIC),
-        ));
-        if ready {
-            out.extend(gateway_cache_meter(&totals, unknown, width));
-            out.push(pair("Requests", totals.calls.to_string(), width, INK));
-            out.push(speed_pair("↗ Rate", &totals, width));
-            out.push(line(
-                format!("{} measured streams", totals.speed_samples),
-                SOFT,
-            ));
-            out.push(section("CALL HEALTH", width));
-            out.push(health_meter(&totals, width));
-            out.push(pair(
-                "Success rate",
-                rate(&totals).map_or("— no samples".into(), |n| format!("{n:.1}%")),
-                width,
-                GREEN,
-            ));
-            out.push(line(
-                format!(
-                    "✓ {}   × {}   ! {}   ◌ {}",
-                    totals.success, totals.failed, totals.interrupted, totals.pending
-                ),
-                INK,
-            ));
-            if totals.unknown > 0 {
-                out.push(pair(
-                    "Unknown tokens",
-                    totals.unknown.to_string(),
-                    width,
-                    GOLD,
-                ));
-            }
-            if totals.calls == 0 {
-                out.push(line("○ No gateway traffic", SOFT));
-                out.push(line("Select a Mux API model with /model", SOFT));
-            }
-        } else {
-            out.push(line("◌ Loading gateway…", SOFT));
-        }
-        out
-    }
     pub(super) fn grok_tokens(&self, width: u16) -> Vec<Line<'static>> {
         let selected = self.active_session.as_ref().filter(|s| s.client == "Grok");
         let row = if selected.is_some() {
@@ -356,20 +363,6 @@ impl Monitor {
         if self.help {
             return self.stats_content(width);
         }
-        if self.client == 2 {
-            if self.page == config::PulseStartPage::Sessions {
-                return self.session_content(width);
-            }
-            if self.page == config::PulseStartPage::Charts {
-                return self.chart_content(width);
-            }
-            let mut out = self.account_content(width);
-            if !self.subscription_mode() {
-                out.extend(self.grok_gateway_tokens(width));
-            }
-            out.extend(self.grok_tokens(width));
-            return out;
-        }
         let mut out = if self.page != config::PulseStartPage::Sessions
             && self.page != config::PulseStartPage::Charts
         {
@@ -383,9 +376,6 @@ impl Monitor {
     pub(super) fn mini_content(&self, width: u16) -> Vec<Line<'static>> {
         if self.help {
             return self.mini_stats_content(width);
-        }
-        if self.client == 2 {
-            return self.content(width);
         }
         let mut out = if self.page != config::PulseStartPage::Sessions
             && self.page != config::PulseStartPage::Charts
@@ -508,189 +498,41 @@ impl Monitor {
             return out;
         }
         if self.page == config::PulseStartPage::Charts {
-            let gateway = metrics(&self.snapshot, self.client());
-            let session = self.session_hours_today();
-            let mut out = vec![
-                mini_line("CHARTS / TODAY", width, BLUE),
-                mini_line(format!("Calls  {}", gateway.total.calls), width, INK),
-                mini_line(mini_sparkline(&gateway.hours), width, BLUE),
-                mini_line("00   06   12   18   24", width, SOFT),
-                mini_line(
-                    format!("Session  {} tok", short(session.iter().sum())),
-                    width,
-                    GREEN,
-                ),
-                mini_line(mini_sparkline(&session), width, GREEN),
-            ];
-            out.push(mini_line("GATEWAY / HOURLY CALLS", width, BLUE));
-            out.extend(mini_hourly_rows(&gateway.hours, width, BLUE));
+            let mut out = vec![mini_line("CHARTS / TODAY", width, BLUE)];
+            if let Some((message, color)) = self.gateway_placeholder() {
+                out.push(mini_line(message, width, color));
+            } else {
+                let gateway = metrics(&self.snapshot, self.client());
+                out.extend([
+                    mini_line(format!("Calls  {}", gateway.total.calls), width, INK),
+                    mini_line(mini_sparkline(&gateway.hours), width, BLUE),
+                    mini_line("00   06   12   18   24", width, SOFT),
+                    mini_line("GATEWAY / HOURLY CALLS", width, BLUE),
+                ]);
+                out.extend(mini_hourly_rows(&gateway.hours, width, BLUE));
+            }
             out.push(mini_line("SESSION / HOURLY TOKENS", width, GREEN));
-            out.extend(mini_hourly_rows(&session, width, GREEN));
+            if self.active_session.is_none() {
+                out.push(mini_line("Waiting for agent session ID…", width, SOFT));
+            } else if let Some(row) = self.active_row() {
+                if row.tokens.known {
+                    let session = self.session_hours_today();
+                    out.push(mini_line(
+                        format!("Session  {} tok", short(session.iter().sum())),
+                        width,
+                        GREEN,
+                    ));
+                    out.push(mini_line(mini_sparkline(&session), width, GREEN));
+                    out.extend(mini_hourly_rows(&session, width, GREEN));
+                } else {
+                    out.push(mini_line("Session tokens unavailable", width, GOLD));
+                }
+            } else {
+                out.push(mini_line("Waiting for local session log…", width, SOFT));
+            }
             return out;
         }
-        if self.subscription_mode() {
-            return if self.visual_mode {
-                self.visual_active_content(width)
-            } else {
-                self.active_content(width)
-            };
-        }
-        let m = metrics(&self.snapshot, self.client());
-        let t = &m.total;
-        let unknown = t.calls > 0 && t.unknown == t.calls;
-        let total = if self.refreshed.is_none() || unknown {
-            "—".into()
-        } else {
-            short(t.input + t.output)
-        };
-        let mut out = vec![mini_line(
-            format!("TODAY  {}", self.snapshot.today()),
-            width,
-            BLUE,
-        )];
-        out.extend(mini_token_total(&total, width, BLUE));
-        out.extend([
-            mini_line(format!("{} calls", t.calls), width, SOFT),
-            mini_line(
-                format!(
-                    "↑ {}  ↓ {}",
-                    if unknown { "?".into() } else { short(t.input) },
-                    if unknown { "?".into() } else { short(t.output) }
-                ),
-                width,
-                SOFT,
-            ),
-            mini_line(
-                format!(
-                    "OK {}  ×{}  !{}",
-                    rate(t).map_or("—".into(), |r| format!("{r:.0}%")),
-                    t.failed,
-                    t.interrupted
-                ),
-                width,
-                GREEN,
-            ),
-        ]);
-        if let Some(active) = self.active_row() {
-            out.push(mini_line("CURRENT SESSION", width, METRIC));
-            out.push(mini_line(
-                format!("● {} session", active.client),
-                width,
-                GREEN,
-            ));
-            let total = if active.tokens.known {
-                short(active.tokens.total())
-            } else {
-                "?".into()
-            };
-            out.extend(mini_token_total(&total, width, METRIC));
-            if active.tokens.known {
-                out.push(mini_line(
-                    format!(
-                        "↑ {}  ↓ {}",
-                        short(active.tokens.input),
-                        short(active.tokens.output)
-                    ),
-                    width,
-                    SOFT,
-                ));
-                out.push(mini_line(
-                    format!(
-                        "↺ R {}  W {}",
-                        short(active.tokens.read),
-                        short(active.tokens.write)
-                    ),
-                    width,
-                    SOFT,
-                ));
-            }
-        }
-        let entries: Vec<(String, &Totals)> = if self.models {
-            m.models.iter().map(|(name, t)| (name.clone(), t)).collect()
-        } else {
-            m.providers
-                .values()
-                .map(|(name, t)| (name.clone(), t))
-                .collect()
-        };
-        out.push(mini_line(
-            if self.models {
-                "MODELS · m switch"
-            } else {
-                "PROVIDERS · m switch"
-            },
-            width,
-            BLUE,
-        ));
-        if entries.is_empty() {
-            out.push(mini_line("No tracked requests", width, SOFT));
-        }
-        for (name, totals) in entries {
-            out.push(mini_line(
-                format!("{}  {} calls", name, totals.calls),
-                width,
-                INK,
-            ));
-            out.push(mini_line(
-                format!(
-                    "  {} tok  ×{}",
-                    token_label(totals),
-                    totals.failed + totals.interrupted
-                ),
-                width,
-                SOFT,
-            ));
-        }
-        out.push(mini_line("GATEWAY / DETAIL", width, BLUE));
-        out.push(mini_line(
-            format!(
-                "↺ R {}  W {}",
-                if unknown {
-                    "?".into()
-                } else {
-                    short(t.cache_read)
-                },
-                if unknown {
-                    "?".into()
-                } else {
-                    short(t.cache_write)
-                }
-            ),
-            width,
-            SOFT,
-        ));
-        out.push(mini_line(
-            format!(
-                "↺ hit {}",
-                if t.cache_input > 0 {
-                    format!("{:.1}%", 100.0 * t.cache_hits as f64 / t.cache_input as f64)
-                } else {
-                    "—".into()
-                }
-            ),
-            width,
-            SOFT,
-        ));
-        out.push(mini_speed_line(t, width));
-        out.push(mini_line(
-            format!(
-                "✓{}  ×{}  !{}  ◌{}",
-                t.success, t.failed, t.interrupted, t.pending
-            ),
-            width,
-            GREEN,
-        ));
-        out.push(mini_line(format!("Compactions {}", m.compact), width, SOFT));
-        if t.unknown > 0 {
-            out.push(mini_line(
-                format!("Unknown tokens: {} calls", t.unknown),
-                width,
-                GOLD,
-            ));
-        }
-        out.push(mini_line("CALLS / EACH HOUR", width, BLUE));
-        out.extend(mini_hourly_rows(&m.hours, width, BLUE));
-        out
+        self.home_stats_content(width, true)
     }
     pub(super) fn draw_mini(&mut self, f: &mut ratatui::Frame, area: Rect) {
         if area.height < 4 {
@@ -732,66 +574,24 @@ impl Monitor {
             );
         }
         let body = mini_body(area);
-        let mut content = self.mini_content(body.width);
-        if self.client != 2
-            && !self.subscription_mode()
-            && self.visual_mode
-            && !self.help
-            && self.page != config::PulseStartPage::Sessions
-            && self.page != config::PulseStartPage::Charts
-        {
-            let totals = metrics(&self.snapshot, self.client()).total;
-            content.insert(
-                self.account_content(body.width).len() + 4,
-                health_meter(&totals, body.width),
-            );
-        }
+        let content = self.mini_content(body.width);
         self.limit = (content.len() as u16).saturating_sub(body.height);
         self.scroll = self.scroll.min(self.limit);
         f.render_widget(Paragraph::new(content).scroll((self.scroll, 0)), body);
         if area.height >= 4 {
-            let status = if self.client == 2 && self.error.is_none() {
-                "● Auto-update · r refresh".into()
-            } else if let Some(error) = &self.error {
-                format!("! {error}")
-            } else if let Some(notice) = &self.notice {
-                notice.clone()
-            } else if self.page == config::PulseStartPage::Sessions
-                && self.sessions_refreshed.is_none()
-            {
-                "◌ sessions".into()
-            } else if self.page != config::PulseStartPage::Sessions && self.refreshed.is_none() {
-                "◌ loading".into()
-            } else if self.limit > 0 {
-                "↑↓ scroll".into()
-            } else {
-                "● live".into()
-            };
+            let (status, color) = self.page_status();
             f.render_widget(
                 Paragraph::new(clipped(&status, area.width.into()))
-                    .style(Style::default().fg(if self.error.is_some() { RED } else { SOFT })),
+                    .style(Style::default().fg(color)),
                 Rect::new(area.x, area.bottom().saturating_sub(2), area.width, 1),
             );
         }
-        for (label, rect) in [
-            "e",
-            if self.page == config::PulseStartPage::Sessions {
-                "t"
-            } else {
-                "c"
-            },
-            "s",
-            "r",
-            "q",
-        ]
-        .into_iter()
-        .zip(mini_buttons(area))
-        {
+        for button in footer_buttons(area, self.page, self.sessions_sort_tokens) {
             f.render_widget(
-                Paragraph::new(label)
+                Paragraph::new(button.label)
                     .alignment(Alignment::Center)
                     .style(Style::default().fg(BLUE).bg(RAIL)),
-                rect,
+                button.rect,
             );
         }
     }
@@ -840,21 +640,32 @@ impl Monitor {
         hours
     }
     pub(super) fn chart_content(&self, width: u16) -> Vec<Line<'static>> {
-        let gateway = metrics(&self.snapshot, self.client());
         let session = self.session_hours_today();
         let mut out = vec![
             section("CHARTS / TODAY", width),
             line("Gateway calls + active session tokens", SOFT),
             Line::default(),
             section("GATEWAY / REQUESTS BY HOUR", width),
-            pair("Calls today", gateway.total.calls.to_string(), width, BLUE),
         ];
-        out.extend(hourly_chart(&gateway.hours, width, BLUE));
+        if let Some((message, color)) = self.gateway_placeholder() {
+            out.push(line(message, color));
+        } else {
+            let gateway = metrics(&self.snapshot, self.client());
+            out.push(pair(
+                "Calls today",
+                gateway.total.calls.to_string(),
+                width,
+                BLUE,
+            ));
+            out.extend(hourly_chart(&gateway.hours, width, BLUE));
+        }
         out.extend([Line::default(), section("SESSION / TOKENS BY HOUR", width)]);
         if self.active_session.is_none() {
             out.push(line("Waiting for agent session ID…", SOFT));
         } else if self.active_row().is_none() {
             out.push(line("Waiting for local session log…", SOFT));
+        } else if self.active_row().is_some_and(|row| !row.tokens.known) {
+            out.push(line("Session tokens unavailable", GOLD));
         } else {
             out.push(pair(
                 "Tokens today",
@@ -932,108 +743,6 @@ impl Monitor {
             s.tokens.cache_known,
             width,
         ));
-        out
-    }
-    pub(super) fn visual_home_content(&self, width: u16) -> Vec<Line<'static>> {
-        if self.subscription_mode() {
-            return self.visual_active_content(width);
-        }
-        let m = metrics(&self.snapshot, self.client());
-        let t = &m.total;
-        let mut out = vec![section_meta("TOKENS", &self.snapshot.today(), width)];
-        if self.refreshed.is_none() {
-            out.push(line("◌ Reading gateway usage…", SOFT));
-            let active = self.visual_active_content(width);
-            if !active.is_empty() {
-                out.extend(active);
-            }
-            return out;
-        }
-        let unknown = t.calls > 0 && t.unknown == t.calls;
-        let total = if unknown {
-            "—".into()
-        } else {
-            short(t.input + t.output)
-        };
-        out.extend(token_digits(&total, BLUE));
-        out.push(if unknown {
-            line("I/O ░░░░░░░░░░ I ? O ?", SOFT)
-        } else {
-            compact_token_meter(t.input, t.output, width)
-        });
-        out.push(pair(
-            "● Calls / unknown",
-            format!("{} / {}", t.calls, t.unknown),
-            width,
-            INK,
-        ));
-        out.extend(gateway_cache_meter(t, unknown, width));
-        out.push(speed_pair("↗ Rate", t, width));
-        out.push(line(format!("{} measured streams", t.speed_samples), SOFT));
-        out.push(section("CALL HEALTH", width));
-        let health = rate(t);
-        out.push(health_meter(t, width));
-        out.push(pair(
-            "Success rate",
-            health.map_or("— no samples".into(), |n| format!("{n:.1}%")),
-            width,
-            GREEN,
-        ));
-        out.push(line(
-            format!(
-                "✓ {}   × {}   ! {}   ◌ {}",
-                t.success, t.failed, t.interrupted, t.pending
-            ),
-            INK,
-        ));
-        out.push(pair("Compaction", m.compact.to_string(), width, SOFT));
-        let active = self.visual_active_content(width);
-        if !active.is_empty() {
-            out.extend(active);
-        }
-        out.push(if self.models {
-            section_action("MODELS / TODAY", "[Providers m]", width)
-        } else {
-            section_action("PROVIDERS / TODAY", "[Models m]", width)
-        });
-        let mut entries: Vec<(String, &Totals)> = if self.models {
-            m.models
-                .iter()
-                .map(|(name, totals)| {
-                    (
-                        if name.is_empty() {
-                            "Unknown model".into()
-                        } else {
-                            name.clone()
-                        },
-                        totals,
-                    )
-                })
-                .collect()
-        } else {
-            m.providers
-                .values()
-                .map(|(name, totals)| (name.clone(), totals))
-                .collect()
-        };
-        entries.sort_by(|a, b| b.1.calls.cmp(&a.1.calls).then_with(|| a.0.cmp(&b.0)));
-        if entries.is_empty() {
-            out.push(line("No tracked requests today", SOFT));
-            out.push(line("Waiting for gateway traffic…", SOFT));
-        }
-        for (name, totals) in entries {
-            out.push(pair(&name, format!("{} calls", totals.calls), width, INK));
-            out.push(pair(
-                &format!("{} tok", token_label(totals)),
-                format!("× {}", totals.failed + totals.interrupted),
-                width,
-                if totals.failed + totals.interrupted > 0 {
-                    RED
-                } else {
-                    SOFT
-                },
-            ));
-        }
         out
     }
     pub(super) fn active_content(&self, width: u16) -> Vec<Line<'static>> {
@@ -1194,53 +903,151 @@ impl Monitor {
                 line("v: text / visual view", BLUE),
             ];
         }
-        if self.visual_mode {
-            return self.visual_home_content(width);
-        }
+        self.home_stats_content(width, false)
+    }
+    fn home_stats_content(&self, width: u16, mini: bool) -> Vec<Line<'static>> {
+        let active = if self.client == 2 {
+            self.grok_tokens(width)
+        } else if mini {
+            self.mini_active_content(width)
+        } else if self.visual_mode {
+            self.visual_active_content(width)
+        } else {
+            self.active_content(width)
+        };
         if self.subscription_mode() {
-            return self.active_content(width);
+            return active;
         }
-        let mut out = vec![];
-        let m = metrics(&self.snapshot, self.client());
-        let t = &m.total;
-        let ready = self.refreshed.is_some();
-        if !ready {
-            out.push(section_meta("TOKENS", &self.snapshot.today(), width));
-            out.push(line("◌ Reading gateway usage…", SOFT));
-            let active = if self.client == 2 {
-                vec![]
+        let metrics = metrics(&self.snapshot, self.client());
+        let mut out = self.gateway_summary(width, &metrics.total, mini);
+        out.extend(active);
+        if self.gateway_placeholder().is_none() {
+            out.extend(self.gateway_details(width, &metrics, mini));
+        }
+        out
+    }
+    fn mini_active_content(&self, width: u16) -> Vec<Line<'static>> {
+        if self.source_pane.is_none() {
+            return vec![];
+        }
+        let mut out = vec![mini_line("SESSION / ALL TIME", width, METRIC)];
+        let Some(active) = self.active_row() else {
+            out.push(mini_line(
+                if self.active_session.is_none() {
+                    "Waiting for agent session ID…"
+                } else {
+                    "Waiting for local session log…"
+                },
+                width,
+                SOFT,
+            ));
+            return out;
+        };
+        out.push(mini_line(
+            format!("● {} session", active.client),
+            width,
+            GREEN,
+        ));
+        let total = if active.tokens.known {
+            short(active.tokens.total())
+        } else {
+            "—".into()
+        };
+        out.extend(mini_token_total(&total, width, METRIC));
+        if active.tokens.known {
+            out.push(mini_line(
+                format!(
+                    "↑ {}  ↓ {}",
+                    short(active.tokens.input),
+                    short(active.tokens.output)
+                ),
+                width,
+                SOFT,
+            ));
+            out.push(mini_line(
+                format!(
+                    "↺ R {}  W {}",
+                    short(active.tokens.read),
+                    short(active.tokens.write)
+                ),
+                width,
+                SOFT,
+            ));
+        } else {
+            out.push(mini_line("Session tokens unavailable", width, GOLD));
+        }
+        out
+    }
+    fn gateway_summary(&self, width: u16, t: &Totals, mini: bool) -> Vec<Line<'static>> {
+        let mut out = if mini {
+            vec![
+                mini_line("GATEWAY / TODAY", width, BLUE),
+                mini_line(self.snapshot.today(), width, SOFT),
+            ]
+        } else {
+            vec![section_meta(
+                "GATEWAY TOKENS",
+                &self.snapshot.today(),
+                width,
+            )]
+        };
+        if let Some((message, color)) = self.gateway_placeholder() {
+            out.push(if mini {
+                mini_line(message, width, color)
             } else {
-                self.active_content(width)
-            };
-            if !active.is_empty() {
-                out.extend(active);
-            }
+                line(message, color)
+            });
             return out;
         }
         let unknown = t.calls > 0 && t.unknown == t.calls;
-        let value = if !ready || (t.calls > 0 && t.unknown == t.calls) {
+        let value = if unknown {
             "—".into()
         } else {
             short(t.input + t.output)
         };
-        out.extend([section_meta("TOKENS", &self.snapshot.today(), width)]);
-        out.extend(token_digits(&value, BLUE));
-        let input = if unknown {
-            "—".into()
+        out.extend(if mini {
+            mini_token_total(&value, width, BLUE)
         } else {
-            short(t.input)
-        };
-        let output = if unknown {
-            "—".into()
+            token_digits(&value, BLUE)
+        });
+        if self.visual_mode {
+            out.push(if unknown {
+                line("I/O ░░░░░░░░░░ I ? O ?", SOFT)
+            } else {
+                compact_token_meter(t.input, t.output, width)
+            });
         } else {
-            short(t.output)
-        };
-        out.push(duo_line(
+            let input = if unknown {
+                "—".into()
+            } else {
+                short(t.input)
+            };
+            let output = if unknown {
+                "—".into()
+            } else {
+                short(t.output)
+            };
+            out.push(duo_line(
+                width,
+                ("↑ Input", "↑", &input, BLUE),
+                ("↓ Output", "↓", &output, METRIC),
+            ));
+        }
+        out.push(pair(
+            if self.visual_mode {
+                "● Calls / unknown"
+            } else {
+                "REQUESTS"
+            },
+            if self.visual_mode {
+                format!("{} / {}", t.calls, t.unknown)
+            } else {
+                t.calls.to_string()
+            },
             width,
-            ("↑ Input", "↑", &input, BLUE),
-            ("↓ Output", "↓", &output, METRIC),
+            INK,
         ));
-        if t.unknown > 0 {
+        if !self.visual_mode && t.unknown > 0 {
             out.push(line(
                 format!(
                     "! {} {} lack token data",
@@ -1250,46 +1057,56 @@ impl Monitor {
                 GOLD,
             ));
         }
-        out.push(pair(
-            "REQUESTS",
-            if ready {
-                t.calls.to_string()
+        out
+    }
+    fn gateway_details(&self, width: u16, m: &Metrics, mini: bool) -> Vec<Line<'static>> {
+        let t = &m.total;
+        let unknown = t.calls > 0 && t.unknown == t.calls;
+        let mut out = vec![];
+        if self.visual_mode {
+            out.extend(gateway_cache_meter(t, unknown, width));
+            out.push(if mini {
+                mini_speed_line(t, width)
             } else {
+                speed_pair("↗ Rate", t, width)
+            });
+            out.push(line(format!("{} measured streams", t.speed_samples), SOFT));
+        } else {
+            let read = if unknown {
                 "—".into()
-            },
-            width,
-            INK,
-        ));
-        let read = if unknown {
-            "—".into()
-        } else {
-            short(t.cache_read)
-        };
-        let write = if unknown {
-            "—".into()
-        } else {
-            short(t.cache_write)
-        };
-        out.push(duo_line(
-            width,
-            ("↺ Read", "R", &read, GREEN),
-            ("Write", "W", &write, SOFT),
-        ));
-        out.push(pair(
-            "Cache hit",
-            if t.cache_input > 0 {
-                format!("{:.1}%", 100.0 * t.cache_hits as f64 / t.cache_input as f64)
             } else {
+                short(t.cache_read)
+            };
+            let write = if unknown {
                 "—".into()
-            },
-            width,
-            BLUE,
-        ));
-        out.push(speed_pair("Output rate (E2E)", t, width));
-        out.push(line(
-            format!("  ↳ {} measured streams", t.speed_samples),
-            SOFT,
-        ));
+            } else {
+                short(t.cache_write)
+            };
+            out.push(duo_line(
+                width,
+                ("↺ Read", "R", &read, GREEN),
+                ("Write", "W", &write, SOFT),
+            ));
+            out.push(pair(
+                "Cache hit",
+                if t.cache_input > 0 {
+                    format!("{:.1}%", 100.0 * t.cache_hits as f64 / t.cache_input as f64)
+                } else {
+                    "—".into()
+                },
+                width,
+                BLUE,
+            ));
+            out.push(if mini {
+                mini_speed_line(t, width)
+            } else {
+                speed_pair("Output rate (E2E)", t, width)
+            });
+            out.push(line(
+                format!("  ↳ {} measured streams", t.speed_samples),
+                SOFT,
+            ));
+        }
         out.push(section("CALL HEALTH", width));
         let health = rate(t);
         let color = if t.failed + t.interrupted > 0 {
@@ -1303,38 +1120,23 @@ impl Monitor {
             width,
             if health.is_some() { color } else { SOFT },
         ));
-        out.push(Line::from(progress_spans(
-            health.map(|r| r / 100.0),
-            width.into(),
-            color,
-        )));
-        out.push(pair("✓ Success", t.success.to_string(), width, GREEN));
-        out.push(pair(
-            "× Failed",
-            t.failed.to_string(),
-            width,
-            if t.failed + t.interrupted > 0 {
-                RED
-            } else {
-                SOFT
-            },
-        ));
-        out.push(pair(
-            "! Interrupted",
-            t.interrupted.to_string(),
-            width,
-            if t.interrupted > 0 { GOLD } else { SOFT },
-        ));
-        out.push(pair("◌ Pending", t.pending.to_string(), width, GOLD));
-        out.push(pair("↘ Compaction", m.compact.to_string(), width, SOFT));
-        let active = if self.client == 2 {
-            vec![]
+        if self.visual_mode {
+            out.push(health_meter(t, width));
         } else {
-            self.active_content(width)
-        };
-        if !active.is_empty() {
-            out.extend(active);
+            out.push(Line::from(progress_spans(
+                health.map(|r| r / 100.0),
+                width.into(),
+                color,
+            )));
         }
+        out.push(line(
+            format!(
+                "✓ {} · × {} · ! {} · ◌ {}",
+                t.success, t.failed, t.interrupted, t.pending
+            ),
+            INK,
+        ));
+        out.push(pair("↘ Compaction", m.compact.to_string(), width, SOFT));
         out.push(if self.models {
             section_action("MODELS / TODAY", "[Providers m]", width)
         } else {
@@ -1377,6 +1179,10 @@ impl Monitor {
                     SOFT
                 },
             ));
+        }
+        if mini {
+            out.push(mini_line("CALLS / EACH HOUR", width, BLUE));
+            out.extend(mini_hourly_rows(&m.hours, width, BLUE));
         }
         out
     }
@@ -1740,109 +1546,17 @@ impl Monitor {
                 &mut state,
             );
         }
-        let status = if self.page == config::PulseStartPage::Sessions {
-            if self.sessions.warnings > 0 {
-                format!("! {} logs unavailable · r retry", self.sessions.warnings)
-            } else if let Some(time) = self.sessions_refreshed {
-                format!(
-                    "● Sessions updated {}s ago · on change",
-                    time.elapsed().as_secs()
-                )
-            } else {
-                "◌ Reading local sessions…".into()
-            }
-        } else if self.page == config::PulseStartPage::Charts {
-            if self.sessions.warnings > 0 {
-                format!(
-                    "! {} session logs unavailable · r retry",
-                    self.sessions.warnings
-                )
-            } else {
-                "● Charts auto-update · c: Home".into()
-            }
-        } else if let Some(note) = &self.notice {
-            note.clone()
-        } else if self.client == 2 && self.error.is_none() {
-            "● Auto-update · r refresh".into()
-        } else if let Some(error) = &self.error {
-            format!("! STALE · {error}")
-        } else if let Some(time) = self.refreshed {
-            format!("● Checked {}s ago · every 2s", time.elapsed().as_secs())
-        } else {
-            "◌ Reading local usage…".into()
-        };
+        let (status, color) = self.page_status();
         f.render_widget(
-            Paragraph::new(status).style(Style::default().fg(
-                if ((self.page == config::PulseStartPage::Sessions
-                    || self.page == config::PulseStartPage::Charts)
-                    && self.sessions.warnings > 0)
-                    || (self.page != config::PulseStartPage::Sessions && self.error.is_some())
-                {
-                    RED
-                } else {
-                    SOFT
-                },
-            )),
+            Paragraph::new(clipped(&status, inner.width.into())).style(Style::default().fg(color)),
             Rect::new(inner.x, area.bottom() - 2, inner.width, 1),
         );
-        for (label, rect) in [
-            if inner.width >= 44 {
-                "↗ Edit(e)"
-            } else {
-                "↗(e)"
-            },
-            if inner.width < 44 {
-                if self.page == config::PulseStartPage::Sessions {
-                    "T(t)"
-                } else {
-                    "C(c)"
-                }
-            } else if self.page == config::PulseStartPage::Sessions {
-                if self.sessions_sort_tokens {
-                    "Recent(t)"
-                } else {
-                    "Tokens(t)"
-                }
-            } else if self.page == config::PulseStartPage::Charts {
-                "Home(c)"
-            } else {
-                "Chart(c)"
-            },
-            if inner.width < 36 {
-                if self.page == config::PulseStartPage::Sessions {
-                    "H(s)"
-                } else {
-                    "S(s)"
-                }
-            } else if inner.width < 44 {
-                if self.page == config::PulseStartPage::Sessions {
-                    "Home(s)"
-                } else {
-                    "Sess(s)"
-                }
-            } else if self.page == config::PulseStartPage::Sessions {
-                "Home(s)"
-            } else {
-                "Sessions(s)"
-            },
-            "↻(r)",
-            "×(q)",
-        ]
-        .into_iter()
-        .zip(buttons(inner))
-        {
-            let compact;
-            let label = if label.width() > usize::from(rect.width) {
-                compact = label.find('(').map(|i| &label[i..]).unwrap_or(label);
-                compact
-            } else {
-                label
-            };
+        for button in footer_buttons(inner, self.page, self.sessions_sort_tokens) {
             f.render_widget(
-                Paragraph::new(label)
+                Paragraph::new(button.label)
                     .alignment(Alignment::Center)
                     .style(Style::default().fg(BLUE).bg(RAIL)),
-                rect,
+                button.rect,
             );
         }
     }

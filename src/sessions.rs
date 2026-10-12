@@ -5,29 +5,73 @@ use std::{
     fs::{self, File},
     io::{BufRead, BufReader, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
-    sync::mpsc::SyncSender,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+        mpsc::SyncSender,
+    },
     time::SystemTime,
 };
 
-pub fn watch_changes(
-    roots: &[(PathBuf, bool)],
-    wake: SyncSender<()>,
-) -> Option<notify::RecommendedWatcher> {
-    use notify::{RecursiveMode, Watcher};
+/// Keeps partial watches alive while reporting full coverage and runtime health.
+pub struct ChangeWatch {
+    _watcher: Option<notify::RecommendedWatcher>,
+    complete: bool,
+    healthy: Arc<AtomicBool>,
+}
 
-    let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-        if matches!(event, Ok(event) if !matches!(event.kind, notify::EventKind::Access(_))) {
-            let _ = wake.try_send(());
-        }
-    })
-    .ok()?;
-    let mut watched = false;
+impl ChangeWatch {
+    /// A runtime watcher error requires rebuilding the watch before this can recover.
+    pub fn is_complete(&self) -> bool {
+        self.complete && self.healthy.load(Ordering::Acquire)
+    }
+}
+
+fn register_roots<F>(roots: &[(PathBuf, bool)], mut register: F) -> bool
+where
+    F: FnMut(&Path) -> bool,
+{
+    let mut complete = !roots.is_empty();
     for (root, _) in roots {
-        if root.is_dir() && watcher.watch(root, RecursiveMode::Recursive).is_ok() {
-            watched = true;
+        if !root.is_dir() || !register(root) {
+            complete = false;
         }
     }
-    watched.then_some(watcher)
+    complete
+}
+
+fn on_watch_event(
+    event: notify::Result<notify::Event>,
+    healthy: &AtomicBool,
+    wake: &SyncSender<()>,
+) {
+    match event {
+        Ok(event) if matches!(event.kind, notify::EventKind::Access(_)) => return,
+        Ok(_) => {}
+        Err(_) => healthy.store(false, Ordering::Release),
+    }
+    let _ = wake.try_send(());
+}
+
+pub fn watch_changes(roots: &[(PathBuf, bool)], wake: SyncSender<()>) -> ChangeWatch {
+    use notify::{RecursiveMode, Watcher};
+
+    let healthy = Arc::new(AtomicBool::new(true));
+    let callback_health = Arc::clone(&healthy);
+    let mut watcher = notify::recommended_watcher(move |event| {
+        on_watch_event(event, &callback_health, &wake);
+    })
+    .ok();
+    let complete = watcher.as_mut().is_some_and(|watcher| {
+        register_roots(roots, |root| {
+            watcher.watch(root, RecursiveMode::Recursive).is_ok()
+        })
+    });
+    ChangeWatch {
+        _watcher: watcher,
+        complete,
+        healthy,
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -711,10 +755,122 @@ mod tests {
     }
 
     #[test]
+    fn registration_requires_every_root_and_continues_after_failures() {
+        let dirs: Vec<_> = (0..4).map(|_| tempfile::tempdir().unwrap()).collect();
+        let roots: Vec<_> = dirs
+            .iter()
+            .map(|dir| (dir.path().to_path_buf(), true))
+            .collect();
+        assert!(!register_roots(&[], |_| panic!("empty roots")));
+        let mut attempted = Vec::new();
+        assert!(!register_roots(&roots, |root| {
+            attempted.push(root.to_path_buf());
+            root != dirs[1].path()
+        }));
+        assert_eq!(
+            attempted,
+            roots
+                .iter()
+                .map(|(root, _)| root.clone())
+                .collect::<Vec<_>>()
+        );
+        assert!(register_roots(&roots, |_| true));
+
+        let file = dirs[0].path().join("not-a-directory");
+        fs::write(&file, b"file").unwrap();
+        let mixed = [
+            roots[0].clone(),
+            (dirs[0].path().join("missing"), true),
+            (file, false),
+            roots[3].clone(),
+        ];
+        attempted.clear();
+        assert!(!register_roots(&mixed, |root| {
+            attempted.push(root.to_path_buf());
+            true
+        }));
+        assert_eq!(attempted, vec![roots[0].0.clone(), roots[3].0.clone()]);
+    }
+
+    #[test]
+    fn watcher_errors_degrade_even_when_the_wake_channel_is_full() {
+        let temp = tempfile::tempdir().unwrap();
+        let roots = [(temp.path().to_path_buf(), true)];
+        let (wake, changes) = std::sync::mpsc::sync_channel(1);
+        let watcher = watch_changes(&roots, wake.clone());
+        assert!(watcher.is_complete());
+        on_watch_event(
+            Ok(notify::Event::new(notify::EventKind::Access(
+                notify::event::AccessKind::Any,
+            ))),
+            &watcher.healthy,
+            &wake,
+        );
+        assert!(matches!(
+            changes.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+        assert!(watcher.is_complete());
+
+        on_watch_event(
+            Ok(notify::Event::new(notify::EventKind::Any)),
+            &watcher.healthy,
+            &wake,
+        );
+        assert!(watcher.is_complete());
+        assert!(matches!(
+            wake.try_send(()),
+            Err(std::sync::mpsc::TrySendError::Full(()))
+        ));
+        on_watch_event(
+            Err(notify::Error::generic("watch failed")),
+            &watcher.healthy,
+            &wake,
+        );
+        assert!(!watcher.is_complete());
+        changes.try_recv().unwrap();
+        on_watch_event(
+            Ok(notify::Event::new(notify::EventKind::Any)),
+            &watcher.healthy,
+            &wake,
+        );
+        assert!(!watcher.is_complete());
+        changes.try_recv().unwrap();
+        on_watch_event(
+            Err(notify::Error::generic("still failed")),
+            &watcher.healthy,
+            &wake,
+        );
+        changes.try_recv().unwrap();
+        assert!(!watcher.is_complete());
+        let rebuilt = watch_changes(&roots, wake);
+        assert!(rebuilt.is_complete());
+    }
+
+    #[test]
+    fn incomplete_watcher_keeps_successfully_registered_roots() {
+        let temp = tempfile::tempdir().unwrap();
+        let (wake, changes) = std::sync::mpsc::sync_channel(1);
+        let watcher = watch_changes(
+            &[
+                (temp.path().join("missing"), true),
+                (temp.path().to_path_buf(), true),
+            ],
+            wake,
+        );
+        assert!(!watcher.is_complete());
+        append(&temp.path().join("partial-session.jsonl"), claude("m1", 1));
+        changes
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+    }
+
+    #[test]
     fn watcher_wakes_when_a_session_log_changes() {
         let temp = tempfile::tempdir().unwrap();
         let (wake, changes) = std::sync::mpsc::sync_channel(1);
-        let _watcher = watch_changes(&[(temp.path().to_path_buf(), true)], wake).unwrap();
+        let watcher = watch_changes(&[(temp.path().to_path_buf(), true)], wake);
+        assert!(watcher.is_complete());
         append(&temp.path().join("new-session.jsonl"), claude("m1", 1));
         changes
             .recv_timeout(std::time::Duration::from_secs(5))
