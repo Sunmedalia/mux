@@ -10,6 +10,54 @@ enum SourceStatus {
 }
 
 impl Monitor {
+    fn draw_help_page(&mut self, f: &mut ratatui::Frame) {
+        let screen = f.area();
+        f.render_widget(
+            Block::default().style(Style::default().bg(BG).fg(INK)),
+            screen,
+        );
+        let (area, body) = help_area(screen);
+        draw_page_header(f, area, 0, false, true);
+        let content = self.content(body.width);
+        self.limit = (content.len() as u16).saturating_sub(body.height);
+        self.scroll = self.scroll.min(self.limit);
+        f.render_widget(Paragraph::new(content).scroll((self.scroll, 0)), body);
+        if self.limit > 0 {
+            let mut state = scroll_state(
+                usize::from(self.limit + body.height),
+                usize::from(self.scroll),
+                usize::from(body.height),
+            );
+            f.render_stateful_widget(
+                Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                    .begin_symbol(None)
+                    .end_symbol(None)
+                    .thumb_style(Style::default().fg(BLUE))
+                    .track_style(Style::default().fg(RAIL)),
+                Rect::new(area.right().saturating_sub(1), body.y, 1, body.height),
+                &mut state,
+            );
+        }
+        if area.height >= 2 {
+            f.render_widget(
+                Paragraph::new(self.help_language.text(
+                    "l 切换中 / 英 · ? / Esc 返回",
+                    "l: 中文 / English · ? / Esc: back",
+                ))
+                .style(Style::default().fg(SOFT)),
+                Rect::new(area.x, area.bottom() - 2, area.width, 1),
+            );
+        }
+        for button in help_footer(area, self.help_language) {
+            f.render_widget(
+                Paragraph::new(button.label)
+                    .alignment(Alignment::Center)
+                    .style(Style::default().fg(BLUE).bg(RAIL)),
+                button.rect,
+            );
+        }
+    }
+
     fn subscription_mode(&self) -> bool {
         match self.client {
             1 => self.accounts.codex.subscription,
@@ -105,15 +153,15 @@ impl Monitor {
     pub(super) fn header_switch_rect(&self, area: Rect, mini: bool) -> Rect {
         page_header_rects(
             area,
-            if mini { 4 } else { 9 },
+            pulse_header_reserve(area, mini),
             self.page == config::PulseStartPage::Git,
         )[1]
     }
     fn draw_token_header(&self, f: &mut ratatui::Frame, area: Rect, mini: bool) {
-        let reserve = if mini { 4 } else { 9 };
+        let reserve = pulse_header_reserve(area, mini);
         draw_page_header(f, area, reserve, false, self.picker.is_none());
         let suffix = if self.help {
-            "HELP"
+            "帮助"
         } else if self.page == config::PulseStartPage::Sessions {
             "SESSIONS"
         } else if self.page == config::PulseStartPage::Charts {
@@ -389,16 +437,7 @@ impl Monitor {
     }
     pub(super) fn mini_stats_content(&self, width: u16) -> Vec<Line<'static>> {
         if self.help {
-            let mut out = vec![
-                mini_line("↑ input  ↓ output", width, BLUE),
-                mini_line("↺ cache · R read · W write", width, SOFT),
-            ];
-            out.extend(
-                self.content(width)
-                    .into_iter()
-                    .map(|l| mini_line(l.to_string(), width, SOFT)),
-            );
-            return out;
+            return self.stats_content(width);
         }
         if self.page == config::PulseStartPage::Sessions {
             let mut out = vec![mini_line("SESSIONS / ALL TIME", width, BLUE)];
@@ -546,10 +585,16 @@ impl Monitor {
             return;
         }
         self.draw_token_header(f, area, true);
+        if area.width >= 24 {
+            f.render_widget(
+                Paragraph::new("v").style(Style::default().fg(SOFT)),
+                Rect::new(area.right() - 7, area.y, 1, 1),
+            );
+        }
         if area.width >= 10 {
             f.render_widget(
-                Paragraph::new("v ?").style(Style::default().fg(SOFT)),
-                Rect::new(area.right().saturating_sub(3), area.y, 3, 1),
+                Paragraph::new("Help").style(Style::default().fg(SOFT)),
+                pulse_help_rect(area),
             );
         }
         let tabs = Layout::horizontal([Constraint::Ratio(1, 4); 4]).split(Rect::new(
@@ -852,56 +897,15 @@ impl Monitor {
             return self.chart_content(width);
         }
         if self.help {
-            return vec![
-                section("ABOUT THIS DATA", width),
-                line("a: Codex / Grok accounts", BLUE),
-                line("↑↓ select · Enter confirm", SOFT),
-                Line::default(),
-                line("Current session: local log", INK),
-                line("for the focused agent pane.", INK),
-                Line::default(),
-                line("Today's gateway totals: only", SOFT),
-                line("this Mux config's traffic.", SOFT),
-                line("Direct API and subscription", SOFT),
-                line("traffic aren't in that total.", SOFT),
-                Line::default(),
-                line("Success rate excludes pending", SOFT),
-                line("requests; failures and", SOFT),
-                line("interruptions count against it.", SOFT),
-                Line::default(),
-                line("Charts: hourly today; each", SOFT),
-                line("series scales to its peak.", SOFT),
-                line("Visual I/O: blue input,", SOFT),
-                line("gold output; bars show share.", SOFT),
-                line("HIT: cache hit share;", SOFT),
-                line("R/W: cache read/write.", SOFT),
-                line("Calls / unknown: requests", SOFT),
-                line("with missing token counts.", SOFT),
-                Line::default(),
-                line("Cache hit = cached reads /", SOFT),
-                line("all input in measured", SOFT),
-                line("successful generation calls.", SOFT),
-                line("Cache writes are not hits.", SOFT),
-                line("Write uses upstream-reported", SOFT),
-                line("cache creation tokens;", SOFT),
-                line("cache misses aren't writes.", SOFT),
-                Line::default(),
-                line("Output rate: successful", SOFT),
-                line("streams, all output tokens /", SOFT),
-                line("request start to completion.", SOFT),
-                line("Includes first-token wait,", SOFT),
-                line("reasoning and network time.", SOFT),
-                line("Weighted average today;", SOFT),
-                line("not pure model decode speed.", SOFT),
-                line("Old/unmeasured calls excluded.", SOFT),
-                line("Speed colors (tok/s):", SOFT),
-                line("<50 red · 50–99 purple", SOFT),
-                line("100–199 blue · 200–299 green", SOFT),
-                line("300+ rainbow", SOFT),
-                Line::default(),
-                line("? / Esc to return", BLUE),
-                line("v: text / visual view", BLUE),
-            ];
+            return help_content(
+                if self.page == config::PulseStartPage::Charts {
+                    HelpPage::Charts
+                } else {
+                    HelpPage::Usage
+                },
+                self.help_language,
+                width,
+            );
         }
         self.home_stats_content(width, false)
     }
@@ -1319,26 +1323,7 @@ impl Monitor {
     }
     pub(super) fn session_content(&self, width: u16) -> Vec<Line<'static>> {
         if self.help {
-            return vec![
-                section("ABOUT SESSIONS", width),
-                line("Current: focused agent pane.", INK),
-                line("Local Claude / Codex logs.", INK),
-                line("Each row: whole session", SOFT),
-                line("tokens, not today's usage.", SOFT),
-                line("Input includes cached tokens.", SOFT),
-                line("Cache reuse = read / input.", SOFT),
-                line("Writes are not cache hits.", SOFT),
-                line("Forks may include inherited", SOFT),
-                line("tokens; children are separate.", SOFT),
-                line("Current follows pane focus.", SOFT),
-                line("Visual I/O: blue input,", SOFT),
-                line("gold output; bars show share.", SOFT),
-                line("s: Usage / Sessions", BLUE),
-                line("Alt+1/2: Token/Git · g: Git · T: Token", BLUE),
-                line("t: recent / tokens sort", BLUE),
-                line("? / Esc to return", BLUE),
-                line("v: text / visual view", BLUE),
-            ];
+            return help_content(HelpPage::Sessions, self.help_language, width);
         }
         if self.visual_mode {
             return self.visual_session_content(width);
@@ -1483,6 +1468,10 @@ impl Monitor {
             && usize::from(y - body.y) + usize::from(self.scroll) == 1
     }
     fn draw_content(&mut self, f: &mut ratatui::Frame) {
+        if self.help {
+            self.draw_help_page(f);
+            return;
+        }
         let area = f.area();
         f.render_widget(
             Block::default().style(Style::default().bg(BG).fg(INK)),
@@ -1500,8 +1489,8 @@ impl Monitor {
             Rect::new(inner.right() - 9, inner.y, 4, 1),
         );
         f.render_widget(
-            Paragraph::new("?(?)").style(Style::default().fg(SOFT)),
-            Rect::new(inner.right() - 4, inner.y, 4, 1),
+            Paragraph::new("Help").style(Style::default().fg(SOFT)),
+            pulse_help_rect(inner),
         );
         let tabs = Layout::horizontal([Constraint::Ratio(1, 4); 4]).split(Rect::new(
             inner.x,

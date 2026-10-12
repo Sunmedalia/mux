@@ -631,13 +631,22 @@ pub(super) fn page_header_rects(area: Rect, reserve: u16, git: bool) -> [Rect; 2
 }
 pub(super) fn pulse_header_area(screen: Rect) -> (Rect, u16) {
     let mini = screen.width < 32 || screen.height < 12;
-    (
-        if mini {
-            screen
-        } else {
-            screen.inner(Margin::new(2, 0))
-        },
-        if mini { 4 } else { 9 },
+    let area = if mini {
+        screen
+    } else {
+        screen.inner(Margin::new(2, 0))
+    };
+    (area, pulse_header_reserve(area, mini))
+}
+pub(super) fn pulse_header_reserve(area: Rect, mini: bool) -> u16 {
+    if mini && area.width < 24 { 4 } else { 9 }
+}
+pub(super) fn pulse_help_rect(area: Rect) -> Rect {
+    Rect::new(
+        area.right().saturating_sub(4).max(area.x),
+        area.y,
+        area.width.min(4),
+        u16::from(area.height > 0),
     )
 }
 pub(super) fn draw_page_header(

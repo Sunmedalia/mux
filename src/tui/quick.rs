@@ -23,6 +23,7 @@ mod accounts;
 mod collector;
 mod focus;
 mod git;
+mod help;
 mod model;
 mod picker;
 mod render;
@@ -31,6 +32,7 @@ mod widgets;
 use super::meters::digits;
 use collector::*;
 use focus::*;
+use help::{HelpLanguage, HelpPage, help_area, help_content, help_footer};
 use model::*;
 pub(super) use widgets::preview_lines;
 use widgets::*;
@@ -313,6 +315,12 @@ pub(super) fn run(paths: AppPaths) -> Result<()> {
             }
             continue;
         }
+        if monitor.help {
+            if monitor.help_input(&input, Rect::new(0, 0, size.width, size.height)) {
+                continue;
+            }
+            break;
+        }
         let key = match input {
             Event::Key(k) if k.kind == event::KeyEventKind::Press => Some(k),
             Event::Mouse(m) => {
@@ -376,26 +384,16 @@ pub(super) fn run(paths: AppPaths) -> Result<()> {
                                 Some(KeyCode::Char('g'))
                             }
                             MouseEventKind::Down(MouseButton::Left)
-                                if m.row == 0
-                                    && (!mini || area.width >= 10)
-                                    && m.column
-                                        >= area.right().saturating_sub(if mini {
-                                            2
-                                        } else {
-                                            4
-                                        }) =>
+                                if (!mini || area.width >= 10)
+                                    && contains(pulse_help_rect(area), m.column, m.row) =>
                             {
                                 Some(KeyCode::Char('?'))
                             }
                             MouseEventKind::Down(MouseButton::Left)
-                                if m.row == 0
-                                    && (!mini || area.width >= 10)
-                                    && m.column
-                                        >= area.right().saturating_sub(if mini {
-                                            4
-                                        } else {
-                                            9
-                                        }) =>
+                                if m.row == area.y
+                                    && (!mini || area.width >= 24)
+                                    && m.column >= area.right().saturating_sub(9)
+                                    && m.column < pulse_help_rect(area).x =>
                             {
                                 Some(KeyCode::Char('v'))
                             }
@@ -529,7 +527,8 @@ pub(super) fn run(paths: AppPaths) -> Result<()> {
                 }
                 KeyCode::PageUp => monitor.scroll = monitor.scroll.saturating_sub(10),
                 KeyCode::Char('?') => {
-                    monitor.help = !monitor.help;
+                    monitor.help_return_scroll = monitor.scroll;
+                    monitor.help = true;
                     monitor.scroll = 0;
                 }
                 KeyCode::Home | KeyCode::Esc => {
@@ -1654,10 +1653,87 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join("\n")
         };
-        assert!(!text(&m).contains("subscription"));
+        assert!(!text(&m).contains("订阅流量"));
         m.help = true;
-        assert!(text(&m).contains("subscription"));
-        assert!(text(&m).contains("gateway totals"));
+        assert!(text(&m).contains("订阅流量"));
+        assert!(text(&m).contains("今日网关"));
+    }
+    #[test]
+    fn token_help_switches_languages_by_key_and_click_and_preserves_page() {
+        for page in [
+            config::PulseStartPage::Home,
+            config::PulseStartPage::Sessions,
+            config::PulseStartPage::Charts,
+        ] {
+            for width in [20, 32, 48, 80] {
+                let screen = Rect::new(0, 0, width, 20);
+                let mut monitor = Monitor {
+                    page,
+                    help: true,
+                    help_return_scroll: 3,
+                    ..Default::default()
+                };
+                let mut terminal = Terminal::new(TestBackend::new(width, 20)).unwrap();
+                terminal.draw(|f| monitor.draw(f)).unwrap();
+                assert!(monitor.help_input(
+                    &Event::Key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE)),
+                    screen
+                ));
+                assert_eq!(monitor.help_language, HelpLanguage::English);
+                assert_eq!(monitor.scroll, 0);
+                terminal.draw(|f| monitor.draw(f)).unwrap();
+                assert!(monitor.content(76)[0].to_string().contains("Token help"));
+                let (area, _) = help_area(screen);
+                let click = |rect: Rect| {
+                    Event::Mouse(MouseEvent {
+                        kind: MouseEventKind::Down(MouseButton::Left),
+                        column: rect.x,
+                        row: rect.y,
+                        modifiers: KeyModifiers::NONE,
+                    })
+                };
+                assert!(monitor.help_input(
+                    &click(help_footer(area, monitor.help_language)[0].rect),
+                    screen
+                ));
+                assert_eq!(monitor.help_language, HelpLanguage::Chinese);
+                assert!(!monitor.help_input(
+                    &click(help_footer(area, monitor.help_language)[2].rect),
+                    screen
+                ));
+                assert!(monitor.help_input(
+                    &Event::Key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE)),
+                    screen
+                ));
+                assert_eq!(monitor.scroll, monitor.limit);
+                assert!(monitor.help_input(
+                    &click(help_footer(area, monitor.help_language)[1].rect),
+                    screen
+                ));
+                assert!(!monitor.help);
+                assert_eq!(monitor.scroll, 3);
+                assert_eq!(monitor.page, page);
+            }
+        }
+    }
+    #[test]
+    fn token_header_labels_help_in_normal_and_mini_layouts() {
+        for (width, height) in [(20, 10), (24, 10), (32, 10), (48, 30)] {
+            let mut monitor = Monitor::default();
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal.draw(|f| monitor.draw(f)).unwrap();
+            let header_text = (0..width)
+                .map(|x| terminal.backend().buffer()[(x, 0)].symbol())
+                .collect::<String>();
+            assert!(header_text.contains("Help"));
+            let (header, reserve) = pulse_header_area(Rect::new(0, 0, width, height));
+            let switch = page_header_rects(header, reserve, false)[1];
+            assert!(switch.right() <= pulse_help_rect(header).x);
+            assert_eq!(
+                monitor.header_switch_rect(header, width < 32 || height < 12),
+                switch
+            );
+        }
     }
     #[test]
     fn independent_layout_and_scrolling_at_narrow_sizes() {

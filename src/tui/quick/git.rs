@@ -41,6 +41,7 @@ enum Modal {
         description: Box<str>,
     },
     Message(String),
+    Help(HelpPage),
     OperationResult {
         recover_commit: bool,
     },
@@ -116,6 +117,7 @@ pub(super) struct GitPane {
     hunk_rows: Vec<u16>,
     diff_anchor: Option<usize>,
     modal: Option<Modal>,
+    help_language: HelpLanguage,
     busy: bool,
     notice: String,
     notice_until: Option<Instant>,
@@ -221,6 +223,12 @@ fn watch_focus(dirty: Arc<AtomicBool>, stopped: Arc<AtomicBool>) {
     }
 }
 impl GitPane {
+    fn help_available(&self) -> bool {
+        !self.busy
+            && self.search_before.is_none()
+            && (self.modal.is_none() || matches!(self.modal, Some(Modal::Help(_))))
+    }
+
     pub(super) fn can_switch_workspace(&self) -> bool {
         !self.busy && self.modal.is_none() && self.search_before.is_none()
     }
@@ -1312,7 +1320,7 @@ impl GitPane {
             KeyCode::Char('?') => {
                 self.remember_scroll();
                 self.scroll = 0;
-                self.modal = Some(Modal::Message("GIT LOG\nCurrent branch history, newest first.\n↑↓ / j/k: select commit · Enter: full message, stats and Diff\n, / .: newer / older page (50 commits per page)\n/: search commit title and body · Enter applies\nPgUp / PgDn: scroll · r: refresh\nEsc / Files: working tree · g: Git · T: Token · Alt+1/2: Token/Git\nCommit details wrap automatically; Esc returns to the selected commit.".into()));
+                self.modal = Some(Modal::Help(HelpPage::Log));
             }
             _ => {}
         }
@@ -1397,6 +1405,35 @@ impl GitPane {
                         self.modal = Some(Modal::OperationResult { recover_commit });
                     }
                     _ => self.modal = Some(Modal::OperationResult { recover_commit }),
+                },
+                Modal::Help(page) => match key.code {
+                    KeyCode::Char('l') => {
+                        self.help_language.toggle();
+                        self.scroll = 0;
+                        self.modal = Some(Modal::Help(page));
+                    }
+                    KeyCode::Esc | KeyCode::Enter | KeyCode::Char('?') => {
+                        if let Some(scroll) = self.return_scroll.take() {
+                            self.scroll = scroll;
+                        }
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        self.scroll = self.scroll.saturating_add(1).min(self.limit);
+                        self.modal = Some(Modal::Help(page));
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        self.scroll = self.scroll.saturating_sub(1);
+                        self.modal = Some(Modal::Help(page));
+                    }
+                    KeyCode::Home => {
+                        self.scroll = 0;
+                        self.modal = Some(Modal::Help(page));
+                    }
+                    KeyCode::End => {
+                        self.scroll = self.limit;
+                        self.modal = Some(Modal::Help(page));
+                    }
+                    _ => self.modal = Some(Modal::Help(page)),
                 },
                 Modal::Message(message) => match key.code {
                     KeyCode::Esc | KeyCode::Enter => {
@@ -1639,7 +1676,7 @@ impl GitPane {
             KeyCode::Char('?') => {
                 self.remember_scroll();
                 self.scroll = 0;
-                self.modal = Some(Modal::Message("GIT HELP\nEnter: open selected file Diff\nEsc / Files: return to file list\n, / .: previous / next file in Diff\nw: toggle line wrapping (on by default)\na / A: stage all changes\ns: stage selected file (whole file)\nh: stage selected Diff block\n/: search file paths (Files)\np: pin / follow repository\ni: repository details and local fetch record\nu: unstage file or selected hunk\nd: discard file or selected hunk\nD: discard whole unstaged file\nA / U: stage / unstage all\nn: commit staged files\nb: search branches\nL: Git log (current branch)\no: all operations and remotes\n[ / ]: previous / next hunk\n← / →: pan Diff when wrapping is off\nr: refresh\nl: operation output / error details\nEsc: back · g: Git · T: Token · Alt+1/2: Token/Git · q: close Pulse\nCommit: Enter adds a line; Ctrl+Enter or Review opens confirmation.\nPgUp / PgDn: scroll forms and confirmation.\nBinary, new, deleted, renamed and mode changes use whole-file operations.\nResolve conflicts externally, then stage. Pull only fast-forwards.".into()));
+                self.modal = Some(Modal::Help(HelpPage::Git));
             }
             KeyCode::Char('l') => self.open_operation_result(),
             KeyCode::Char('r') => {
@@ -1925,6 +1962,12 @@ impl GitPane {
                 }
                 if mouse.row == 0 {
                     let (area, reserve) = pulse_header_area(self.screen);
+                    if self.help_available()
+                        && area.width >= 10
+                        && contains(pulse_help_rect(area), mouse.column, mouse.row)
+                    {
+                        return self.key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
+                    }
                     let button = page_header_rects(area, reserve, true)[1];
                     if self.modal.is_none()
                         && self.search_before.is_none()
@@ -2067,6 +2110,7 @@ impl GitPane {
                     lines.extend(body.lines().map(|text| line(safe_text(text), INK)));
                     lines
                 }
+                Modal::Help(page) => help_content(*page, self.help_language, self.body.width),
                 Modal::Message(message) => std::iter::once(line("GIT · DETAILS", BLUE))
                     .chain(message.lines().map(|s| {
                         line(
@@ -2356,9 +2400,26 @@ impl GitPane {
                 next.enabled = *selected + 1 < count;
                 vec![previous, next]
             } else if self.modal.is_some() {
-                let mut previous = control("Page up", "PgUp", KeyCode::PageUp);
+                let help = matches!(self.modal, Some(Modal::Help(_)));
+                let mut previous = control(
+                    if help {
+                        self.help_language.text("上一页", "Page up")
+                    } else {
+                        "Page up"
+                    },
+                    "PgUp",
+                    KeyCode::PageUp,
+                );
                 previous.enabled = self.scroll > 0;
-                let mut next = control("Page down", "PgDn", KeyCode::PageDown);
+                let mut next = control(
+                    if help {
+                        self.help_language.text("下一页", "Page down")
+                    } else {
+                        "Page down"
+                    },
+                    "PgDn",
+                    KeyCode::PageDown,
+                );
                 next.enabled = self.scroll < self.limit;
                 vec![previous, next]
             } else if let Some(history) = &self.history {
@@ -2410,6 +2471,18 @@ impl GitPane {
             }
         } else {
             match &self.modal {
+                Some(Modal::Help(_)) => vec![
+                    control(
+                        self.help_language.switch_label(),
+                        self.help_language.text("English", "中文"),
+                        KeyCode::Char('l'),
+                    ),
+                    control(
+                        self.help_language.text("返回(Esc)", "Back(Esc)"),
+                        self.help_language.text("Esc 返回", "Esc Back"),
+                        KeyCode::Esc,
+                    ),
+                ],
                 Some(Modal::Message(_) | Modal::OperationResult { .. }) => vec![control(
                     if self.history.is_some() {
                         "Log(Esc)"
@@ -2507,7 +2580,6 @@ impl GitPane {
                             control("Refresh(r)", "r Refresh", KeyCode::Char('r')),
                             control("Search(/)", "/ Search", KeyCode::Char('/')),
                             control("Ops(o)", "o Ops", KeyCode::Char('o')),
-                            control("Help(?)", "? Help", KeyCode::Char('?')),
                         ]
                         .into_iter()
                         .map(|mut c| {
@@ -2576,13 +2648,7 @@ impl GitPane {
                     };
                     let mut menu = control("Ops(o)", "o Ops", KeyCode::Char('o'));
                     menu.enabled = self.snapshot.is_some();
-                    vec![
-                        single,
-                        stage,
-                        second,
-                        menu,
-                        control("Help(?)", "? Help", KeyCode::Char('?')),
-                    ]
+                    vec![single, stage, second, menu]
                 }
             }
         };
@@ -2937,6 +3003,18 @@ impl GitPane {
             true,
             self.modal.is_none() && !self.busy && self.search_before.is_none(),
         );
+        if header_area.width >= 10 {
+            frame.render_widget(
+                Paragraph::new("Help").style(Style::default().fg(SOFT).add_modifier(
+                    if self.help_available() {
+                        Modifier::empty()
+                    } else {
+                        Modifier::DIM
+                    },
+                )),
+                pulse_help_rect(header_area),
+            );
+        }
         frame.render_widget(
             Paragraph::new(headers),
             Rect::new(
@@ -2990,7 +3068,7 @@ impl GitPane {
         if self
             .modal
             .as_ref()
-            .is_some_and(|m| !matches!(m, Modal::Menu { .. }))
+            .is_some_and(|m| !matches!(m, Modal::Menu { .. } | Modal::Help(_)))
         {
             content = content
                 .into_iter()
@@ -3100,6 +3178,10 @@ impl GitPane {
                         ..
                     } => "Enter commit · Esc edit message",
                     Modal::Confirm { .. } => "Enter confirm · Esc cancel",
+                    Modal::Help(_) => self.help_language.text(
+                        "l 中/英 · ↑↓ 滚动 · ? / Esc 返回",
+                        "l 中文/EN · ↑↓ scroll · ? / Esc back",
+                    ),
                     Modal::Message(_) | Modal::OperationResult { .. } => {
                         "↑↓ / PgUp / PgDn scroll · Esc back"
                     }
@@ -4318,13 +4400,15 @@ mod tests {
         }));
         assert!(pane.diff.is_none());
         render(&mut pane, 48, 20);
+        let (header, _) = pulse_header_area(pane.screen);
+        let help = pulse_help_rect(header);
         pane.input(&Event::Mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
-            column: 42,
-            row: 19,
+            column: help.x,
+            row: help.y,
             modifiers: KeyModifiers::NONE,
         }));
-        assert!(matches!(pane.modal, Some(Modal::Message(_))));
+        assert!(matches!(pane.modal, Some(Modal::Help(_))));
     }
     #[test]
     fn stage_block_button_and_shortcut_keep_stage_all_on_its_existing_key() {
@@ -4553,6 +4637,105 @@ mod tests {
         }
     }
     #[test]
+    fn chinese_help_scrolls_and_returns_to_diff_or_history() {
+        for history in [false, true] {
+            let mut pane = diff_pane();
+            if history {
+                pane.diff = None;
+                pane.history = Some(service::History {
+                    commits: vec![],
+                    page: 0,
+                    has_more: false,
+                    query: String::new(),
+                });
+            }
+            pane.scroll = 3;
+            pane.key(key(KeyCode::Char('?')));
+            assert_eq!(pane.scroll, 0);
+            assert!(matches!(pane.modal, Some(Modal::Help(_))));
+            let text = render(&mut pane, 32, 12);
+            assert!(text.contains("Git") && text.contains('帮'));
+            assert!(pane.lines()[0].to_string().contains(if history {
+                "Git 历史帮助"
+            } else {
+                "Git 帮助"
+            }));
+            pane.key(key(KeyCode::Char('l')));
+            assert_eq!(pane.help_language, HelpLanguage::English);
+            assert_eq!(pane.scroll, 0);
+            let text = render(&mut pane, 32, 12);
+            assert!(text.contains("Git help"));
+            click_footer(&mut pane, false, 0);
+            assert_eq!(pane.help_language, HelpLanguage::Chinese);
+            assert_eq!(pane.scroll, 0);
+            pane.key(key(KeyCode::End));
+            assert!(pane.limit > 0 && pane.scroll == pane.limit);
+            render(&mut pane, 32, 12);
+            pane.key(key(KeyCode::Char('?')));
+            assert!(pane.modal.is_none());
+            assert_eq!(pane.scroll, 3);
+            assert_eq!(pane.history.is_some(), history);
+            assert_eq!(pane.diff.is_some(), !history);
+        }
+    }
+
+    #[test]
+    fn help_moves_to_header_and_keeps_git_footer_actions() {
+        for width in [20, 24, 32, 48, 100] {
+            for page in 0..3 {
+                let mut pane = diff_pane();
+                if page != 1 {
+                    pane.diff = None;
+                }
+                if page == 2 {
+                    pane.history = Some(service::History {
+                        commits: vec![],
+                        page: 0,
+                        has_more: false,
+                        query: String::new(),
+                    });
+                }
+                let text = render(&mut pane, width, 20);
+                assert!(text.contains("Help"));
+                for navigation in [true, false] {
+                    assert!(
+                        !pane
+                            .controls(navigation)
+                            .iter()
+                            .any(|control| control.key.code == KeyCode::Char('?'))
+                    );
+                }
+                if page == 0 {
+                    assert_eq!(
+                        pane.controls(true)
+                            .iter()
+                            .map(|control| control.key.code)
+                            .collect::<Vec<_>>(),
+                        vec![
+                            KeyCode::Enter,
+                            KeyCode::Char('n'),
+                            KeyCode::Char('L'),
+                            KeyCode::Char('b')
+                        ]
+                    );
+                }
+                let (header, _) = pulse_header_area(pane.screen);
+                let help = pulse_help_rect(header);
+                assert!(pane.input(&Event::Mouse(MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: help.right() - 1,
+                    row: help.y,
+                    modifiers: KeyModifiers::NONE
+                })));
+                assert!(matches!(pane.modal, Some(Modal::Help(_))));
+                pane.key(key(KeyCode::Esc));
+                assert!(pane.modal.is_none());
+                assert_eq!(pane.diff.is_some(), page == 1);
+                assert_eq!(pane.history.is_some(), page == 2);
+            }
+        }
+    }
+    #[test]
     fn menu_and_scroll_buttons_disable_at_boundaries_and_with_no_matches() {
         let mut pane = GitPane {
             modal: Some(Modal::Menu {
@@ -4632,12 +4815,7 @@ mod tests {
         let (updates, responses) = mpsc::channel();
         pane.updates = Some(responses);
         render(&mut pane, 48, 20);
-        pane.input(&Event::Mouse(MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column: 15,
-            row: 19,
-            modifiers: KeyModifiers::NONE,
-        }));
+        click_footer(&mut pane, false, 1);
         assert!(matches!(
             pane.modal,
             Some(Modal::Form {

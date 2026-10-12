@@ -23,11 +23,88 @@ pub(super) struct Monitor {
     pub(super) limit: u16,
     pub(super) models: bool,
     pub(super) help: bool,
+    pub(super) help_language: HelpLanguage,
+    pub(super) help_return_scroll: u16,
     pub(super) refreshed: Option<Instant>,
     pub(super) error: Option<String>,
     pub(super) notice: Option<String>,
 }
 impl Monitor {
+    pub(super) fn help_input(&mut self, input: &Event, screen: Rect) -> bool {
+        let (area, body) = help_area(screen);
+        let code = match input {
+            Event::Key(key) if key.kind == event::KeyEventKind::Press => {
+                if key.code == KeyCode::Char('q')
+                    || (key.code == KeyCode::Char('c')
+                        && key.modifiers.contains(KeyModifiers::CONTROL))
+                {
+                    return false;
+                }
+                Some(key.code)
+            }
+            Event::Mouse(mouse) => match mouse.kind {
+                MouseEventKind::ScrollDown => Some(KeyCode::Down),
+                MouseEventKind::ScrollUp => Some(KeyCode::Up),
+                MouseEventKind::Down(MouseButton::Left)
+                | MouseEventKind::Drag(MouseButton::Left) => {
+                    if let Some(target) = scrollbar_target(
+                        body,
+                        area.right().saturating_sub(1),
+                        mouse.column,
+                        mouse.row,
+                        self.limit,
+                    ) {
+                        self.scroll = target;
+                        return true;
+                    }
+                    if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                        if contains(
+                            page_header_rects(area, 0, false)[1],
+                            mouse.column,
+                            mouse.row,
+                        ) {
+                            self.select_workspace(true);
+                        }
+                        help_footer(area, self.help_language)
+                            .iter()
+                            .find(|button| contains(button.rect, mouse.column, mouse.row))
+                            .map(|button| button.key)
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            },
+            _ => None,
+        };
+        match code {
+            Some(KeyCode::Char('l')) => {
+                self.help_language.toggle();
+                self.scroll = 0;
+            }
+            Some(KeyCode::Esc | KeyCode::Enter | KeyCode::Char('?')) => {
+                self.help = false;
+                self.scroll = self.help_return_scroll;
+            }
+            Some(KeyCode::Up | KeyCode::Char('k')) => self.scroll = self.scroll.saturating_sub(1),
+            Some(KeyCode::Down | KeyCode::Char('j')) => {
+                self.scroll = self.scroll.saturating_add(1).min(self.limit)
+            }
+            Some(KeyCode::PageUp) => self.scroll = self.scroll.saturating_sub(body.height.max(1)),
+            Some(KeyCode::PageDown) => {
+                self.scroll = self
+                    .scroll
+                    .saturating_add(body.height.max(1))
+                    .min(self.limit)
+            }
+            Some(KeyCode::Home) => self.scroll = 0,
+            Some(KeyCode::End) => self.scroll = self.limit,
+            Some(KeyCode::Char('q')) => return false,
+            _ => {}
+        }
+        true
+    }
+
     pub(super) fn apply_preferences(&mut self, preferences: config::UiPreferences) {
         self.visual_mode = preferences.pulse_visual;
         self.models = preferences.pulse_models;
