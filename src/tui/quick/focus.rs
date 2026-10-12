@@ -242,14 +242,11 @@ impl Monitor {
         let session_changed = self.active_session != update.session;
         self.focused_pane = Some(update.pane_id);
         self.focused_client = Some(update.client);
-        if focus_changed || agent_changed {
+        if (focus_changed || agent_changed) && self.page != config::PulseStartPage::Sessions {
             self.client = update.client;
         }
         if focus_changed || agent_changed || session_changed {
             self.active_session = update.session;
-            if self.page == config::PulseStartPage::Sessions {
-                self.scroll = 0;
-            }
         }
     }
 }

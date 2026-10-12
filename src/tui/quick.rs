@@ -27,6 +27,7 @@ mod help;
 mod model;
 mod picker;
 mod render;
+mod sessions;
 mod widgets;
 #[cfg(test)]
 use super::meters::digits;
@@ -142,6 +143,8 @@ pub(super) fn run(paths: AppPaths) -> Result<()> {
             redraw = true;
         }
         while let Ok(snapshot) = session_updates.try_recv() {
+            let size = terminal.size()?;
+            monitor.capture_session_position(Rect::new(0, 0, size.width, size.height));
             monitor.sessions = snapshot;
             monitor.sessions_refreshed = Some(Instant::now());
             redraw = true;
@@ -200,6 +203,11 @@ pub(super) fn run(paths: AppPaths) -> Result<()> {
             last_clock_redraw = Instant::now();
         }
         if redraw {
+            if monitor.page == config::PulseStartPage::Sessions {
+                monitor.reconcile_sessions();
+            }
+            let size = terminal.size()?;
+            monitor.reveal_session_selection(Rect::new(0, 0, size.width, size.height));
             terminal.draw(|f| {
                 monitor.draw(f);
                 monitor.pulse_theme.apply(f.buffer_mut());
@@ -211,6 +219,20 @@ pub(super) fn run(paths: AppPaths) -> Result<()> {
         }
         redraw = true;
         let input = event::read()?;
+        if matches!(&input, Event::Key(key) if key.kind == event::KeyEventKind::Press && key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
+        {
+            break;
+        }
+        let size = terminal.size()?;
+        let screen = Rect::new(0, 0, size.width, size.height);
+        let input = match monitor.footer_key(&input, screen) {
+            Some(Some(key)) => Event::Key(key),
+            Some(None) => continue,
+            None => input,
+        };
+        if monitor.sessions_input(&input, Rect::new(0, 0, size.width, size.height)) {
+            continue;
+        }
         if let Event::Key(key) = &input
             && monitor.workspace_shortcut(*key)
         {
@@ -222,14 +244,21 @@ pub(super) fn run(paths: AppPaths) -> Result<()> {
             }
             match &input {
                 Event::Key(k)
-                    if k.code == KeyCode::Char('q')
-                        || (k.code == KeyCode::Char('c')
-                            && k.modifiers.contains(KeyModifiers::CONTROL)) =>
+                    if k.code == KeyCode::Char('c')
+                        && k.modifiers.contains(KeyModifiers::CONTROL) =>
                 {
                     break;
                 }
-                _ => {
+                Event::Key(key) if key.code == KeyCode::Char('T') => {
                     monitor.select_workspace(false);
+                    continue;
+                }
+                Event::Mouse(mouse) if mouse.row == screen.y => {
+                    monitor.select_workspace(false);
+                    continue;
+                }
+                _ => {
+                    monitor.return_home();
                     continue;
                 }
             }
@@ -408,12 +437,6 @@ pub(super) fn run(paths: AppPaths) -> Result<()> {
                                 }
                                 None
                             }
-                            MouseEventKind::Down(MouseButton::Left) => {
-                                footer_buttons(area, monitor.page, monitor.sessions_sort_tokens)
-                                    .iter()
-                                    .find(|button| contains(button.rect, m.column, m.row))
-                                    .map(|button| button.key)
-                            }
                             _ => None,
                         }
                     }
@@ -429,13 +452,22 @@ pub(super) fn run(paths: AppPaths) -> Result<()> {
             _ => None,
         };
         if let Some(key) = key {
+            if monitor.sessions_input(&Event::Key(key), Rect::new(0, 0, size.width, size.height)) {
+                continue;
+            }
             if monitor.workspace_shortcut(key) {
                 continue;
             }
             match key.code {
+                KeyCode::Char('q') if monitor.page != config::PulseStartPage::Home => {
+                    monitor.return_home()
+                }
                 KeyCode::Char('q') => break,
                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
-                KeyCode::Char('a') if matches!(monitor.client, 1 | 2) => {
+                KeyCode::Char('a')
+                    if matches!(monitor.client, 1 | 2)
+                        && monitor.page == config::PulseStartPage::Home =>
+                {
                     match picker::Picker::load(&theme_paths, monitor.client) {
                         Ok(picker) => {
                             monitor.picker = Some(picker);
@@ -472,12 +504,14 @@ pub(super) fn run(paths: AppPaths) -> Result<()> {
                 KeyCode::Char('t') if monitor.page == config::PulseStartPage::Sessions => {
                     monitor.help = false;
                     monitor.sessions_sort_tokens = !monitor.sessions_sort_tokens;
-                    monitor.scroll = 0;
                 }
                 KeyCode::Char('v') => {
+                    monitor.capture_session_position(screen);
                     monitor.visual_mode = !monitor.visual_mode;
                     monitor.help = false;
-                    monitor.scroll = 0;
+                    if monitor.page != config::PulseStartPage::Sessions {
+                        monitor.scroll = 0;
+                    }
                 }
                 KeyCode::Char('c') => {
                     monitor.page = if monitor.page == config::PulseStartPage::Charts {
@@ -489,6 +523,7 @@ pub(super) fn run(paths: AppPaths) -> Result<()> {
                     monitor.scroll = 0;
                 }
                 KeyCode::Char('s') => {
+                    monitor.reset_session_browser();
                     monitor.page = if monitor.page == config::PulseStartPage::Sessions {
                         config::PulseStartPage::Home
                     } else {
@@ -497,6 +532,10 @@ pub(super) fn run(paths: AppPaths) -> Result<()> {
                     monitor.help = false;
                     monitor.scroll = 0;
                     if monitor.page == config::PulseStartPage::Sessions
+                        && let Some(client) = monitor.focused_client
+                    {
+                        monitor.client = client;
+                    } else if monitor.page == config::PulseStartPage::Home
                         && let Some(client) = monitor.focused_client
                     {
                         monitor.client = client;
@@ -990,7 +1029,7 @@ mod tests {
     }
 
     #[test]
-    fn sessions_filter_follows_focused_agent_even_when_session_id_is_missing() {
+    fn sessions_filter_is_preserved_when_focused_agent_changes() {
         let mut monitor = Monitor {
             page: config::PulseStartPage::Sessions,
             client: 3,
@@ -1016,16 +1055,16 @@ mod tests {
                 id: "codex-one".into(),
             }),
         });
-        assert_eq!(monitor.client(), Some("Codex"));
-        assert_eq!(monitor.session_rows().len(), 1);
-        monitor.client = 3; // A manual All selection lasts until focus changes.
+        assert_eq!(monitor.client(), None);
+        assert_eq!(monitor.session_rows().len(), 2);
+        monitor.client = 1; // Browsing keeps the explicitly selected client.
         monitor.apply_focus(FocusUpdate {
             pane_id: "claude-pane".into(),
             client: 0,
             session: None,
         });
-        assert_eq!(monitor.client(), Some("Claude"));
-        assert_eq!(monitor.session_rows()[0].id, "claude-one");
+        assert_eq!(monitor.client(), Some("Codex"));
+        assert_eq!(monitor.session_rows()[0].id, "codex-one");
         assert!(monitor.active_session.is_none());
     }
 
@@ -1195,7 +1234,7 @@ mod tests {
             .join("\n");
         assert!(history.contains("SESSION HISTORY"));
         assert!(history.contains("No local sessions for this client"));
-        assert_eq!(history.matches(&digits("1000")[0]).count(), 1);
+        assert_eq!(history.matches("1000 tok").count(), 1);
         m.client = 3;
         let all_history = m
             .content(28)
@@ -1304,7 +1343,7 @@ mod tests {
                 .map(ToString::to_string)
                 .collect::<Vec<_>>()
                 .join("\n");
-            for expected in ["SESSION HISTORY", "previous", "I 80  O 20", "R 30 W 10"] {
+            for expected in ["SESSION HISTORY", "previous", "100 tok", "Search(/)"] {
                 assert!(text.contains(expected), "missing {expected}: {text}");
             }
             assert!(history.iter().all(|line| line.width() <= width as usize));
@@ -1565,7 +1604,11 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(body.contains("1000 tok"));
-        assert!(body.contains("700 read"));
+        assert!(body.contains("Search(/)"));
+        assert!(
+            !body.contains("700 read"),
+            "Cache breakdown belongs in details"
+        );
     }
     #[test]
     fn cache_and_request_rate_display_matching_sample_totals() {
@@ -1697,10 +1740,11 @@ mod tests {
                     screen
                 ));
                 assert_eq!(monitor.help_language, HelpLanguage::Chinese);
-                assert!(!monitor.help_input(
-                    &click(help_footer(area, monitor.help_language)[2].rect),
+                assert!(monitor.help_input(
+                    &click(help_footer(area, monitor.help_language)[1].rect),
                     screen
                 ));
+                monitor.help = true;
                 assert!(monitor.help_input(
                     &Event::Key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE)),
                     screen

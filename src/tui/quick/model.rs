@@ -2,6 +2,7 @@ use super::*;
 
 #[derive(Default)]
 pub(super) struct Monitor {
+    pub(super) session_browser: sessions::Browser,
     pub(super) picker: Option<picker::Picker>,
     pub(super) accounts: accounts::Accounts,
     pub(super) pulse_theme: theme::PulseTheme,
@@ -34,10 +35,7 @@ impl Monitor {
         let (area, body) = help_area(screen);
         let code = match input {
             Event::Key(key) if key.kind == event::KeyEventKind::Press => {
-                if key.code == KeyCode::Char('q')
-                    || (key.code == KeyCode::Char('c')
-                        && key.modifiers.contains(KeyModifiers::CONTROL))
-                {
+                if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
                     return false;
                 }
                 Some(key.code)
@@ -82,7 +80,7 @@ impl Monitor {
                 self.help_language.toggle();
                 self.scroll = 0;
             }
-            Some(KeyCode::Esc | KeyCode::Enter | KeyCode::Char('?')) => {
+            Some(KeyCode::Esc | KeyCode::Enter | KeyCode::Char('?' | 'q')) => {
                 self.help = false;
                 self.scroll = self.help_return_scroll;
             }
@@ -99,10 +97,44 @@ impl Monitor {
             }
             Some(KeyCode::Home) => self.scroll = 0,
             Some(KeyCode::End) => self.scroll = self.limit,
-            Some(KeyCode::Char('q')) => return false,
             _ => {}
         }
         true
+    }
+
+    pub(super) fn return_home(&mut self) {
+        self.page = config::PulseStartPage::Home;
+        self.token_page = self.page;
+        self.help = false;
+        self.reset_session_browser();
+        self.scroll = 0;
+        if let Some(client) = self.focused_client {
+            self.client = client;
+        }
+    }
+    pub(super) fn footer_key(&self, input: &Event, screen: Rect) -> Option<Option<KeyEvent>> {
+        if self.page == config::PulseStartPage::Git || self.help {
+            return None;
+        }
+        let Event::Mouse(mouse) = input else {
+            return None;
+        };
+        if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
+            return None;
+        }
+        let area = if screen.width < 32 || screen.height < 12 {
+            screen
+        } else {
+            screen.inner(Margin::new(2, 0))
+        };
+        self.token_footer(area)
+            .iter()
+            .find(|button| contains(button.rect, mouse.column, mouse.row))
+            .map(|button| {
+                button
+                    .enabled
+                    .then(|| KeyEvent::new(button.key, button.modifiers))
+            })
     }
 
     pub(super) fn apply_preferences(&mut self, preferences: config::UiPreferences) {

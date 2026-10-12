@@ -92,6 +92,8 @@ pub(super) fn spawn_session_reader(
             event_due: None,
         };
         let mut startup = true;
+        let mut last_titles = Instant::now();
+        let mut last_snapshot: Option<crate::sessions::Snapshot> = None;
         loop {
             // Consume before reading, never after: a request arriving during read
             // remains sticky even if the bounded wake channel is already full.
@@ -135,12 +137,24 @@ pub(super) fn spawn_session_reader(
                 };
                 schedule.on_read(Instant::now());
                 startup = false;
+                last_titles = Instant::now();
+                last_snapshot = Some(snapshot.clone());
                 if session_send.send(snapshot).is_err() {
                     break;
                 }
                 continue;
             }
-            match wakes.recv_timeout(schedule.wait(Instant::now(), complete)) {
+            if last_titles.elapsed() >= Duration::from_secs(2) {
+                if let Some(snapshot) = &mut last_snapshot
+                    && reader.refresh_titles(snapshot)
+                    && session_send.send(snapshot.clone()).is_err()
+                {
+                    break;
+                }
+                last_titles = Instant::now();
+            }
+            let title_wait = Duration::from_secs(2).saturating_sub(last_titles.elapsed());
+            match wakes.recv_timeout(schedule.wait(Instant::now(), complete).min(title_wait)) {
                 Ok(()) => schedule.on_event(Instant::now()),
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 Err(mpsc::RecvTimeoutError::Timeout) => {}

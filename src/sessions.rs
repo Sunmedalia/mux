@@ -13,6 +13,8 @@ use std::{
     time::SystemTime,
 };
 
+mod titles;
+
 /// Keeps partial watches alive while reporting full coverage and runtime health.
 pub struct ChangeWatch {
     _watcher: Option<notify::RecommendedWatcher>,
@@ -141,6 +143,7 @@ impl Tokens {
 #[derive(Clone, Debug, Default)]
 pub struct Session {
     pub id: String,
+    pub title: Option<String>,
     pub client: &'static str,
     pub project: String,
     pub updated: i64,
@@ -168,6 +171,8 @@ struct CachedFile {
     // Codex emits cumulative totals. Keep the checkpoints so resumed logs with
     // the same session ID can be merged without a false chart spike.
     codex_totals: BTreeMap<i64, i64>,
+    custom_title: Option<String>,
+    ai_title: Option<String>,
 }
 
 impl CachedFile {
@@ -222,6 +227,16 @@ impl CachedFile {
             s.updated = s.updated.max(t);
         }
         if claude {
+            match v.get("type").and_then(Value::as_str) {
+                Some("custom-title") => {
+                    self.custom_title = titles::clean(v.get("customTitle").and_then(Value::as_str))
+                }
+                Some("ai-title") => {
+                    self.ai_title = titles::clean(v.get("aiTitle").and_then(Value::as_str))
+                }
+                _ => {}
+            }
+            s.title = self.custom_title.clone().or_else(|| self.ai_title.clone());
             if let Some(id) = v.get("sessionId").and_then(Value::as_str)
                 && !s.child
             {
@@ -472,8 +487,10 @@ impl CachedFile {
 #[derive(Default)]
 pub struct Reader {
     files: BTreeMap<PathBuf, CachedFile>,
+    title_databases: BTreeMap<PathBuf, titles::Database>,
+    title_summaries: BTreeMap<PathBuf, titles::Summary>,
 }
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Snapshot {
     pub rows: Vec<Session>,
     pub warnings: usize,
@@ -551,6 +568,7 @@ impl Reader {
                 }
             }
         }
+        self.refresh_titles(&mut result);
         result
     }
 }

@@ -88,7 +88,7 @@ impl Picker {
         }
         if self.confirming {
             match code {
-                KeyCode::Esc | KeyCode::Char('n') => {
+                KeyCode::Esc | KeyCode::Char('n' | 'q') => {
                     self.confirming = false;
                 }
                 KeyCode::Enter | KeyCode::Char('y') => {
@@ -113,6 +113,35 @@ impl Picker {
             }
         }
         Action::None
+    }
+    pub(super) fn footer(&self, area: Rect) -> Vec<FooterButton> {
+        let back = footer_control(
+            if self.confirming && self.result.is_none() {
+                ["Accounts(q)", "Accounts", "q"]
+            } else {
+                ["Back(q)", "Back", "q"]
+            },
+            KeyCode::Char('q'),
+            !self.busy,
+        );
+        if self.result.is_some() {
+            return layout_footer(area, vec![back]);
+        }
+        layout_footer(
+            area,
+            vec![
+                footer_control(
+                    if self.confirming {
+                        ["Confirm(Enter)", "Confirm", "↵"]
+                    } else {
+                        ["Select(Enter)", "Select", "↵"]
+                    },
+                    KeyCode::Enter,
+                    !self.busy && !self.choices.is_empty(),
+                ),
+                back,
+            ],
+        )
     }
     fn start(&self) -> usize {
         self.selected.saturating_sub(11)
@@ -241,7 +270,7 @@ impl Picker {
         let accept = if self.busy {
             "Switching…"
         } else if self.result.is_some() {
-            "Close ↵"
+            "Back ↵"
         } else if self.confirming {
             "Confirm [y/↵]"
         } else {
@@ -300,6 +329,25 @@ mod tests {
             row: y,
             modifiers: KeyModifiers::NONE,
         }
+    }
+    #[test]
+    fn footer_tracks_confirmation_result_and_busy_and_q_returns_to_accounts() {
+        let mut p = picker(1);
+        let area = Rect::new(0, 0, 40, 10);
+        assert_eq!(p.footer(area).len(), 2);
+        assert!(p.footer(area)[0].enabled);
+        p.key(KeyCode::Enter);
+        assert!(p.footer(area)[0].label.contains("Confirm"));
+        p.key(KeyCode::Char('q'));
+        assert!(!p.confirming);
+        p.key(KeyCode::Enter);
+        p.key(KeyCode::Enter);
+        assert!(p.footer(area).iter().all(|b| !b.enabled));
+        p.key(KeyCode::Char('q'));
+        assert!(p.busy);
+        p.finish(Ok("Switched".into()));
+        assert_eq!(p.footer(area).len(), 1);
+        assert!(matches!(p.key(KeyCode::Char('q')), Action::Close));
     }
     #[test]
     fn selection_needs_confirmation_and_busy_blocks_duplicate_switches() {

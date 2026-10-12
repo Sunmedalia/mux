@@ -28,51 +28,30 @@ impl HelpLanguage {
     }
 }
 
-pub(super) fn help_footer(area: Rect, language: HelpLanguage) -> [FooterButton; 3] {
-    let tiers = [
-        [
-            language.switch_label(),
-            language.text("返回(Esc)", "Back(Esc)"),
-            language.text("关闭(q)", "Close(q)"),
+pub(super) fn help_footer(area: Rect, language: HelpLanguage) -> Vec<FooterButton> {
+    layout_footer(
+        area,
+        vec![
+            footer_control(
+                [
+                    language.switch_label(),
+                    language.text("English", "中文"),
+                    language.text("EN", "中"),
+                ],
+                KeyCode::Char('l'),
+                true,
+            ),
+            footer_control(
+                [
+                    language.text("返回(q)", "Back(q)"),
+                    language.text("返回", "Back"),
+                    "q",
+                ],
+                KeyCode::Char('q'),
+                true,
+            ),
         ],
-        [
-            language.text("English", "中文"),
-            language.text("返回", "Back"),
-            language.text("关闭", "Close"),
-        ],
-        [language.text("EN", "中"), "Esc", "q"],
-    ];
-    let gap = u16::from(area.width >= 8);
-    let labels = tiers
-        .iter()
-        .find(|labels| {
-            labels.iter().map(|label| label.width()).sum::<usize>() + usize::from(gap * 2)
-                <= usize::from(area.width)
-        })
-        .unwrap_or(&tiers[2]);
-    let minimum = labels.iter().map(|label| label.width() as u16).sum::<u16>() + gap * 2;
-    let extra = area.width.saturating_sub(minimum);
-    let mut x = area.x;
-    std::array::from_fn(|index| {
-        let width =
-            (labels[index].width() as u16 + extra / 3 + u16::from((index as u16) < extra % 3))
-                .min(area.right().saturating_sub(x));
-        let rect = Rect::new(
-            x,
-            area.bottom().saturating_sub(1),
-            width,
-            u16::from(area.height > 0),
-        );
-        x = x
-            .saturating_add(width)
-            .saturating_add(gap)
-            .min(area.right());
-        FooterButton {
-            label: labels[index],
-            key: [KeyCode::Char('l'), KeyCode::Esc, KeyCode::Char('q')][index],
-            rect,
-        }
-    })
+    )
 }
 
 pub(super) fn help_area(screen: Rect) -> (Rect, Rect) {
@@ -188,6 +167,27 @@ pub(super) fn help_content(
                 HelpPage::Charts => {}
                 _ => unreachable!(),
             }
+            if matches!(page, HelpPage::Sessions) {
+                row(
+                    &mut out,
+                    "/",
+                    language.text(
+                        "搜索标题、项目路径、会话 ID 或模型；Enter 完成，Ctrl+U 清空，Esc 取消编辑。",
+                        "Search title, project, ID or model; Enter accepts, Ctrl+U clears, Esc cancels editing.",
+                    ),
+                    width,
+                );
+                row(&mut out, "↑↓ / Enter", language.text("选择会话；Enter 或点击打开详情，q / Esc 返回列表。滚轮滚动列表。", "Select a session; Enter or click opens details, q / Esc returns to the list. Wheel scrolls the list."), width);
+                row(
+                    &mut out,
+                    "Esc",
+                    language.text(
+                        "列表中清除搜索；浏览历史时保留筛选和位置。",
+                        "Clear search in the list; historical browsing keeps filter and position.",
+                    ),
+                    width,
+                );
+            }
             row(
                 &mut out,
                 "v / r",
@@ -209,7 +209,7 @@ pub(super) fn help_content(
             row(
                 &mut out,
                 "e / q",
-                language.text("打开完整 Mux / 关闭侧栏", "Open full Mux / close Pulse"),
+                language.text("e 打开完整 Mux；q 内层逐级返回，仅首页关闭。Ctrl+C 直接退出。", "e opens full Mux; q goes back in inner pages and closes only on Home. Ctrl+C exits directly."),
                 width,
             );
 
@@ -266,6 +266,7 @@ pub(super) fn help_content(
                     );
                 }
                 HelpPage::Sessions => {
+                    row(&mut out, language.text("会话标题", "Session title"), language.text("只读客户端保存的名称；缺少标题时显示项目名与短 ID，不从对话正文生成。", "Read-only client title metadata; fallback to project and short ID. Never generated from conversation bodies."), width);
                     row(
                         &mut out,
                         language.text("会话用量", "Session usage"),
@@ -340,8 +341,8 @@ pub(super) fn help_content(
                 &mut out,
                 language.text("自动跟随", "Auto follow"),
                 language.text(
-                    "切换 agent 焦点时，筛选与当前会话随之更新。",
-                    "Agent focus updates the client filter and current session.",
+                    "切换 agent 焦点时更新当前会话；Sessions 保留筛选与浏览位置。",
+                    "Agent focus updates the current session; Sessions retains its filter and browsing position.",
                 ),
                 width,
             );
@@ -581,6 +582,7 @@ pub(super) fn help_content(
             );
         }
     }
+    row(&mut out, "q / Ctrl+C", language.text("q 非输入状态逐级返回，Git 根页返回 Token 首页；表单与搜索中 q 是文字，执行中不能返回。Ctrl+C 直接退出。", "q goes back outside text input; Git root returns to Token Home. In forms/search, q is text; busy operations block back. Ctrl+C exits directly."), width);
     out
 }
 

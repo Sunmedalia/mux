@@ -535,70 +535,119 @@ pub(super) fn gateway_cache_meter(t: &Totals, unknown: bool, width: u16) -> Vec<
     vec![Line::from(spans)]
 }
 pub(super) struct FooterButton {
-    pub(super) label: &'static str,
+    pub(super) label: String,
     pub(super) key: KeyCode,
+    pub(super) modifiers: KeyModifiers,
+    pub(super) enabled: bool,
     pub(super) rect: Rect,
+}
+pub(super) struct FooterControl {
+    labels: [&'static str; 3],
+    key: KeyEvent,
+    enabled: bool,
+}
+pub(super) fn footer_control(
+    labels: [&'static str; 3],
+    code: KeyCode,
+    enabled: bool,
+) -> FooterControl {
+    FooterControl {
+        labels,
+        key: KeyEvent::new(code, KeyModifiers::NONE),
+        enabled,
+    }
+}
+impl FooterControl {
+    pub(super) fn modified(mut self, modifiers: KeyModifiers) -> Self {
+        self.key.modifiers = modifiers;
+        self
+    }
+}
+pub(super) fn layout_footer(area: Rect, controls: Vec<FooterControl>) -> Vec<FooterButton> {
+    if controls.is_empty() {
+        return vec![];
+    }
+    let count = controls.len() as u16;
+    let gap = u16::from(area.width >= count.saturating_mul(2).saturating_sub(1));
+    let gaps = gap * count.saturating_sub(1);
+    let tier = (0..3)
+        .find(|tier| {
+            controls
+                .iter()
+                .map(|c| c.labels[*tier].width())
+                .sum::<usize>()
+                + usize::from(gaps)
+                <= usize::from(area.width)
+        })
+        .unwrap_or(2);
+    let minimum = controls
+        .iter()
+        .map(|c| c.labels[tier].width() as u16)
+        .sum::<u16>()
+        .saturating_add(gaps);
+    let extra = area.width.saturating_sub(minimum);
+    let mut x = area.x;
+    controls
+        .into_iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let width = (c.labels[tier].width() as u16
+                + extra / count
+                + u16::from((i as u16) < extra % count))
+            .min(area.right().saturating_sub(x));
+            let rect = Rect::new(
+                x,
+                area.bottom().saturating_sub(1).max(area.y),
+                width,
+                u16::from(area.height > 0),
+            );
+            x = x
+                .saturating_add(width)
+                .saturating_add(gap)
+                .min(area.right());
+            FooterButton {
+                label: clipped(c.labels[tier], width.into()),
+                key: c.key.code,
+                modifiers: c.key.modifiers,
+                enabled: c.enabled,
+                rect,
+            }
+        })
+        .collect()
 }
 pub(super) fn footer_buttons(
     area: Rect,
     page: config::PulseStartPage,
     sort_tokens: bool,
-) -> [FooterButton; 5] {
-    let sessions = page == config::PulseStartPage::Sessions;
-    let charts = page == config::PulseStartPage::Charts;
-    let middle = if sessions {
-        if sort_tokens {
-            ["Recent(t)", "Recent", "Recent", "t"]
-        } else {
-            ["Tokens(t)", "Tokens", "Tokens", "t"]
-        }
-    } else if charts {
-        ["Home(c)", "Home", "Home", "c"]
-    } else {
-        ["Chart(c)", "Chart", "Chart", "c"]
+) -> Vec<FooterButton> {
+    let back = || footer_control(["Home(q)", "Home", "q"], KeyCode::Char('q'), true);
+    let refresh = || footer_control(["Refresh(r)", "Refresh", "r"], KeyCode::Char('r'), true);
+    let controls = match page {
+        config::PulseStartPage::Sessions => vec![
+            footer_control(["Search(/)", "Search", "/"], KeyCode::Char('/'), true),
+            footer_control(["Open(Enter)", "Open", "↵"], KeyCode::Enter, true),
+            footer_control(
+                if sort_tokens {
+                    ["Recent(t)", "Recent", "t"]
+                } else {
+                    ["Tokens(t)", "Tokens", "t"]
+                },
+                KeyCode::Char('t'),
+                true,
+            ),
+            refresh(),
+            back(),
+        ],
+        config::PulseStartPage::Charts => vec![refresh(), back()],
+        _ => vec![
+            footer_control(["Edit(e)", "Edit", "e"], KeyCode::Char('e'), true),
+            footer_control(["Chart(c)", "Chart", "c"], KeyCode::Char('c'), true),
+            footer_control(["Sessions(s)", "Sess", "s"], KeyCode::Char('s'), true),
+            refresh(),
+            footer_control(["×(q)", "Close", "q"], KeyCode::Char('q'), true),
+        ],
     };
-    let third = if sessions {
-        ["Home(s)", "Home", "Home", "s"]
-    } else {
-        ["Sessions(s)", "Sessions", "Sess", "s"]
-    };
-    let tiers = [
-        ["Edit(e)", middle[0], third[0], "↻(r)", "×(q)"],
-        ["Edit", middle[1], third[1], "Refresh", "Close"],
-        ["Edit", middle[2], third[2], "↻r", "×q"],
-        ["e", middle[3], third[3], "r", "q"],
-    ];
-    let labels = tiers
-        .iter()
-        .find(|labels| {
-            labels.iter().map(|label| label.width()).sum::<usize>() + 4 <= usize::from(area.width)
-        })
-        .unwrap_or(&tiers[3]);
-    let gap = u16::from(area.width >= 9);
-    let minimum = labels.iter().map(|label| label.width() as u16).sum::<u16>() + gap * 4;
-    let extra = area.width.saturating_sub(minimum);
-    let mut x = area.x;
-    let keys = ['e', if sessions { 't' } else { 'c' }, 's', 'r', 'q'];
-    std::array::from_fn(|index| {
-        let width =
-            (labels[index].width() as u16 + extra / 5 + u16::from((index as u16) < extra % 5))
-                .min(area.right().saturating_sub(x));
-        let rect = Rect::new(
-            x,
-            area.bottom().saturating_sub(1).max(area.y),
-            width,
-            u16::from(area.height > 0),
-        );
-        x = x
-            .saturating_add(width)
-            .saturating_add(gap)
-            .min(area.right());
-        FooterButton {
-            label: labels[index],
-            key: KeyCode::Char(keys[index]),
-            rect,
-        }
-    })
+    layout_footer(area, controls)
 }
 fn page_header_labels(available: u16, git: bool) -> (&'static str, &'static str, u16, u16) {
     let title = if git { "▎ GIT" } else { "▎ TOKEN" };

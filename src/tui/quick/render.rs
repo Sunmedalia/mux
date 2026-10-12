@@ -52,7 +52,11 @@ impl Monitor {
             f.render_widget(
                 Paragraph::new(button.label)
                     .alignment(Alignment::Center)
-                    .style(Style::default().fg(BLUE).bg(RAIL)),
+                    .style(
+                        Style::default()
+                            .fg(if button.enabled { BLUE } else { SOFT })
+                            .bg(if button.enabled { RAIL } else { BG }),
+                    ),
                 button.rect,
             );
         }
@@ -440,101 +444,7 @@ impl Monitor {
             return self.stats_content(width);
         }
         if self.page == config::PulseStartPage::Sessions {
-            let mut out = vec![mini_line("SESSIONS / ALL TIME", width, BLUE)];
-            match (self.active_session.as_ref(), self.active_row()) {
-                (None, _) => out.push(mini_line("◌ Waiting for agent pane", width, SOFT)),
-                (Some(active), None) => out.push(mini_line(
-                    format!("● {} · loading log", active.client),
-                    width,
-                    GREEN,
-                )),
-                (_, Some(session)) => {
-                    let project = std::path::Path::new(&session.project)
-                        .file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy();
-                    out.push(mini_line(
-                        format!("● {} / {}", session.client, project),
-                        width,
-                        GREEN,
-                    ));
-                    out.push(mini_line(
-                        format!(
-                            "{} tok{}",
-                            if session.tokens.known {
-                                short(session.tokens.total())
-                            } else {
-                                "?".into()
-                            },
-                            if session.incomplete { "+?" } else { "" }
-                        ),
-                        width,
-                        INK,
-                    ));
-                    if session.tokens.known {
-                        out.push(mini_line(
-                            format!(
-                                "↑ {}  ↓ {}",
-                                short(session.tokens.input),
-                                short(session.tokens.output)
-                            ),
-                            width,
-                            SOFT,
-                        ));
-                        out.push(mini_line(
-                            format!(
-                                "↺ R {}  W {}",
-                                short(session.tokens.read),
-                                short(session.tokens.write)
-                            ),
-                            width,
-                            SOFT,
-                        ));
-                    }
-                }
-            }
-            out.push(mini_line("HISTORY · t sort", width, BLUE));
-            let rows = self.session_rows();
-            if rows.is_empty() {
-                out.push(mini_line("No local sessions yet", width, SOFT));
-            }
-            for session in rows.into_iter().filter(|s| {
-                !self
-                    .active_session
-                    .as_ref()
-                    .is_some_and(|a| a.client == s.client && a.id == s.id)
-            }) {
-                let project = std::path::Path::new(&session.project)
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy();
-                out.push(mini_line(
-                    format!(
-                        "{} {} · {} tok",
-                        session.client,
-                        project,
-                        if session.tokens.known {
-                            short(session.tokens.total())
-                        } else {
-                            "?".into()
-                        }
-                    ),
-                    width,
-                    INK,
-                ));
-                if session.tokens.known {
-                    out.push(mini_line(
-                        format!(
-                            "  ↑ {} · ↓ {}",
-                            short(session.tokens.input),
-                            short(session.tokens.output)
-                        ),
-                        width,
-                        SOFT,
-                    ));
-                }
-            }
-            return out;
+            return self.browser_content(width);
         }
         if self.page == config::PulseStartPage::Charts {
             let mut out = vec![mini_line("CHARTS / TODAY", width, BLUE)];
@@ -631,11 +541,15 @@ impl Monitor {
                 Rect::new(area.x, area.bottom().saturating_sub(2), area.width, 1),
             );
         }
-        for button in footer_buttons(area, self.page, self.sessions_sort_tokens) {
+        for button in self.token_footer(area) {
             f.render_widget(
                 Paragraph::new(button.label)
                     .alignment(Alignment::Center)
-                    .style(Style::default().fg(BLUE).bg(RAIL)),
+                    .style(
+                        Style::default()
+                            .fg(if button.enabled { BLUE } else { SOFT })
+                            .bg(if button.enabled { RAIL } else { BG }),
+                    ),
                 button.rect,
             );
         }
@@ -747,6 +661,9 @@ impl Monitor {
             out.push(line("Waiting for local session log…", SOFT));
             return out;
         };
+        if let Some(title) = &s.title {
+            out.extend(sessions::wrap_field(title, width));
+        }
         let project = std::path::Path::new(&s.project)
             .file_name()
             .unwrap_or_default()
@@ -820,6 +737,9 @@ impl Monitor {
             ));
             return out;
         };
+        if let Some(title) = &s.title {
+            out.extend(sessions::wrap_field(title, width));
+        }
         let project = std::path::Path::new(&s.project)
             .file_name()
             .unwrap_or_default()
@@ -1218,218 +1138,11 @@ impl Monitor {
         });
         rows
     }
-    pub(super) fn visual_session_content(&self, width: u16) -> Vec<Line<'static>> {
-        let rows = self.session_rows();
-        let history_count = rows
-            .iter()
-            .filter(|s| {
-                !self
-                    .active_session
-                    .as_ref()
-                    .is_some_and(|current| s.client == current.client && s.id == current.id)
-            })
-            .count();
-        let mut out = self.visual_active_content(width);
-        if !out.is_empty() {
-            out.push(Line::default());
-        }
-        out.push(section("SESSION HISTORY", width));
-        out.push(pair(
-            "Earlier sessions",
-            history_count.to_string(),
-            width,
-            BLUE,
-        ));
-        out.push(line(
-            if self.sessions_sort_tokens {
-                "Sorted by tokens · t: recent"
-            } else {
-                "Sorted by recent · t: tokens"
-            },
-            SOFT,
-        ));
-        if self.sessions_refreshed.is_none() {
-            out.push(line("Reading local session logs…", SOFT));
-        } else if rows.is_empty() {
-            out.push(line("No local sessions for this client", SOFT));
-        } else if history_count == 0 {
-            out.push(line("No other sessions for this client", SOFT));
-        }
-        let zone = chrono::FixedOffset::east_opt(self.snapshot.offset)
-            .unwrap_or_else(|| chrono::FixedOffset::east_opt(0).unwrap());
-        for s in rows {
-            if self
-                .active_session
-                .as_ref()
-                .is_some_and(|current| s.client == current.client && s.id == current.id)
-            {
-                continue;
-            }
-            let project = std::path::Path::new(&s.project)
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy();
-            let id: String = s.id.chars().take(8).collect();
-            let detail = format!(
-                "{project} · {id}{}{}",
-                if s.child { " [child]" } else { "" },
-                if s.fork { " *" } else { "" }
-            );
-            out.push(Line::default());
-            out.push(pair(
-                &detail,
-                format!(
-                    "{} tok",
-                    if s.tokens.known {
-                        format!(
-                            "{}{}",
-                            short(s.tokens.total()),
-                            if s.incomplete { "+?" } else { "" }
-                        )
-                    } else {
-                        "?".into()
-                    }
-                ),
-                width,
-                BLUE,
-            ));
-            let time = chrono::DateTime::from_timestamp(s.updated, 0)
-                .map(|t| t.with_timezone(&zone).format("%m-%d %H:%M").to_string())
-                .unwrap_or_else(|| "time ?".into());
-            out.push(pair(s.client, time, width, SOFT));
-            if s.tokens.known {
-                out.push(compact_token_meter(s.tokens.input, s.tokens.output, width));
-                out.push(compact_cache_meter(
-                    s.tokens.read,
-                    s.tokens.write,
-                    s.tokens.cache_reuse_percent(),
-                    s.tokens.cache_known,
-                    width,
-                ));
-            } else {
-                out.push(line("In ? · Out ? · Cache — · R ? / W ?", SOFT));
-            }
-        }
-        if self.sessions.warnings > 0 {
-            if history_count > 0 {
-                out.push(Line::default());
-            }
-            out.push(line(
-                format!("! {} logs unavailable / partial", self.sessions.warnings),
-                GOLD,
-            ));
-        }
-        out
-    }
     pub(super) fn session_content(&self, width: u16) -> Vec<Line<'static>> {
         if self.help {
             return help_content(HelpPage::Sessions, self.help_language, width);
         }
-        if self.visual_mode {
-            return self.visual_session_content(width);
-        }
-        let rows = self.session_rows();
-        let history_count = rows
-            .iter()
-            .filter(|s| {
-                !self
-                    .active_session
-                    .as_ref()
-                    .is_some_and(|current| s.client == current.client && s.id == current.id)
-            })
-            .count();
-        let mut out = self.active_content(width);
-        if !out.is_empty() {
-            out.push(Line::default());
-        }
-        out.extend([
-            section("SESSION HISTORY", width),
-            pair("Earlier sessions", history_count.to_string(), width, BLUE),
-            line(
-                if self.sessions_sort_tokens {
-                    "Sorted by tokens · t: recent"
-                } else {
-                    "Sorted by recent · t: tokens"
-                },
-                SOFT,
-            ),
-        ]);
-        if self.sessions_refreshed.is_none() {
-            out.push(line("Reading local session logs…", SOFT));
-        } else if rows.is_empty() {
-            out.push(line("No local sessions for this client", SOFT));
-        } else if history_count == 0 {
-            out.push(line("No other sessions for this client", SOFT));
-        }
-        let format_tokens = |s: &crate::sessions::Session, n| {
-            if !s.tokens.known {
-                "?".into()
-            } else {
-                format!("{}{}", short(n), if s.incomplete { "+?" } else { "" })
-            }
-        };
-        let zone = chrono::FixedOffset::east_opt(self.snapshot.offset)
-            .unwrap_or_else(|| chrono::FixedOffset::east_opt(0).unwrap());
-        for s in rows {
-            if self
-                .active_session
-                .as_ref()
-                .is_some_and(|current| s.client == current.client && s.id == current.id)
-            {
-                continue;
-            }
-            out.push(Line::default());
-            let project = std::path::Path::new(&s.project)
-                .file_name()
-                .unwrap_or_default()
-                .to_string_lossy();
-            let id: String = s.id.chars().take(8).collect();
-            let detail = format!(
-                "{project} · {id}{}{}",
-                if s.child { " [child]" } else { "" },
-                if s.fork { " *" } else { "" }
-            );
-            out.push(line(clipped(&detail, width.into()), INK));
-            out.push(pair(
-                s.client,
-                format!("{} tok", format_tokens(s, s.tokens.total())),
-                width,
-                BLUE,
-            ));
-            out.push(line(
-                format!(
-                    "In {} · Out {}",
-                    format_tokens(s, s.tokens.input),
-                    format_tokens(s, s.tokens.output)
-                ),
-                SOFT,
-            ));
-            let time = chrono::DateTime::from_timestamp(s.updated, 0)
-                .map(|t| t.with_timezone(&zone).format("%m-%d %H:%M").to_string())
-                .unwrap_or_else(|| "time ?".into());
-            let cache = format!(
-                "↺ {} · {} read",
-                s.tokens
-                    .cache_reuse_percent()
-                    .map_or("—".into(), |rate| format!("{rate:.1}%")),
-                if s.tokens.cache_known {
-                    format_tokens(s, s.tokens.read)
-                } else {
-                    "—".into()
-                }
-            );
-            out.push(pair(&cache, time, width, SOFT));
-        }
-        if self.sessions.warnings > 0 {
-            if history_count > 0 {
-                out.push(Line::default());
-            }
-            out.push(line(
-                format!("! {} logs unavailable / partial", self.sessions.warnings),
-                GOLD,
-            ));
-        }
-        out
+        self.browser_content(width)
     }
     pub(super) fn draw(&mut self, f: &mut ratatui::Frame) {
         if self.page == config::PulseStartPage::Git {
@@ -1540,11 +1253,15 @@ impl Monitor {
             Paragraph::new(clipped(&status, inner.width.into())).style(Style::default().fg(color)),
             Rect::new(inner.x, area.bottom() - 2, inner.width, 1),
         );
-        for button in footer_buttons(inner, self.page, self.sessions_sort_tokens) {
+        for button in self.token_footer(inner) {
             f.render_widget(
                 Paragraph::new(button.label)
                     .alignment(Alignment::Center)
-                    .style(Style::default().fg(BLUE).bg(RAIL)),
+                    .style(
+                        Style::default()
+                            .fg(if button.enabled { BLUE } else { SOFT })
+                            .bg(if button.enabled { RAIL } else { BG }),
+                    ),
                 button.rect,
             );
         }

@@ -1362,7 +1362,16 @@ impl GitPane {
             *selected = *index;
         }
     }
-    fn key(&mut self, key: KeyEvent) -> bool {
+    fn key(&mut self, mut key: KeyEvent) -> bool {
+        let typing = self.search_before.is_some()
+            || matches!(
+                self.modal,
+                Some(Modal::Form { .. }) | Some(Modal::Menu { .. })
+            );
+        if key.code == KeyCode::Char('q') && !typing && key.modifiers == KeyModifiers::NONE {
+            key.code = KeyCode::Esc;
+        }
+
         if self.busy {
             self.reading_key(key.code);
             return true;
@@ -2652,6 +2661,13 @@ impl GitPane {
                 }
             }
         };
+        if !navigation && self.modal.is_none() && self.history.is_none() && self.diff.is_none() {
+            controls.push(if self.filter.is_empty() {
+                control("Token Home(q)", "q Home", KeyCode::Char('q'))
+            } else {
+                control("Clear filter(q)", "q Clear", KeyCode::Char('q'))
+            });
+        }
         if self.busy {
             for control in &mut controls {
                 control.enabled = false;
@@ -3667,6 +3683,33 @@ mod tests {
             .collect()
     }
     #[test]
+    fn q_returns_one_level_but_is_text_in_forms_and_busy_blocks_back() {
+        let mut pane = diff_pane();
+        pane.modal = Some(Modal::Help(HelpPage::Git));
+        assert!(pane.key(key(KeyCode::Char('q'))));
+        assert!(pane.modal.is_none());
+        assert!(pane.diff.is_some());
+        assert!(pane.key(key(KeyCode::Char('q'))));
+        assert!(pane.diff.is_none());
+        assert!(!pane.key(key(KeyCode::Char('q'))));
+        assert!(
+            pane.controls(false)
+                .iter()
+                .any(|c| c.key.code == KeyCode::Char('q') && c.label.contains("Home"))
+        );
+        pane.modal = Some(Modal::Form {
+            kind: FormKind::Create,
+            text: String::new(),
+        });
+        assert!(pane.key(key(KeyCode::Char('q'))));
+        assert!(matches!(&pane.modal, Some(Modal::Form { text, .. }) if text == "q"));
+        pane.key(key(KeyCode::Esc));
+        pane.busy = true;
+        assert!(pane.key(key(KeyCode::Char('q'))));
+        assert!(pane.busy);
+        assert!(pane.controls(false).iter().all(|c| !c.enabled));
+    }
+    #[test]
     fn follows_regular_terminal_in_own_tab_and_retains_cwd_on_pulse_focus() {
         let panes = json!({"result":{"panes":[
             {"pane_id":"source","tab_id":"tab","cwd":"/project","foreground_cwd":"/project/sub","focused":true},
@@ -4604,7 +4647,7 @@ mod tests {
         );
     }
     #[test]
-    fn details_return_to_their_page_and_footer_never_contains_home() {
+    fn details_return_to_their_page_and_home_appears_only_on_git_root() {
         let mut pane = diff_pane();
         for page in 0..3 {
             if page == 1 {
@@ -4620,11 +4663,11 @@ mod tests {
             }
             render(&mut pane, 80, 20);
             for navigation in [true, false] {
-                assert!(
-                    !pane
-                        .controls(navigation)
-                        .iter()
-                        .any(|c| c.key.code == KeyCode::Char('g') || c.label.contains("Home"))
+                let controls = pane.controls(navigation);
+                assert!(!controls.iter().any(|c| c.key.code == KeyCode::Char('g')));
+                assert_eq!(
+                    controls.iter().any(|c| c.label.contains("Home")),
+                    page == 1 && !navigation
                 );
             }
             pane.modal = Some(Modal::Message("Details".into()));
