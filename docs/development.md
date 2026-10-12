@@ -17,7 +17,7 @@ cargo test --locked --bin mux large_ledger_query_benchmark -- --ignored --nocapt
 CI 在 main/dev 分支推送、Pull Request、版本标签推送或手动触发时运行：Ubuntu、macOS 与 Windows 执行检查，Windows 保留 Rust 1.88、格式检查、Clippy、全部功能回归及真实 npm 启动器验证。非发布标签运行额外构建 Windows MSVC 静态运行库程序，检查、打包并测试解压后的 ZIP；`v*` 标签跳过 Windows 打包任务，但仍必须通过 Windows 源码回归与 MSRV 检查。
 版本标签的 Release 还依赖全部 macOS/Linux 测试、MSRV 与构建、依赖安全审计和 Docker 安全回归。标签必须与 Cargo 及 Herdr 插件版本一致，并提供非空的 `docs/releases/<标签>.md` 详细说明；Release 正文直接使用该文件，不自动生成说明。v0.1.21 起当前发布配置仅下载并发布 Linux x86_64、Linux ARM64、macOS ARM64 的三个 `.tar.gz` 及各自 `.sha256`，共六个资产，不发布 Windows 二进制文件；Windows 源码支持和分支 CI 打包验证不变，历史 v0.1.20 Release 保留原样。
 
-独立 Rust 测试按串行调度，避免子进程继承文件锁造成偶发竞争，以及 macOS SQLite WAL 测试并行关闭连接造成超时。每个测试内部的并发请求、读写和冲突检查仍照常执行。
+独立 Rust 测试按串行调度，避免子进程继承文件锁造成偶发竞争，以及 macOS SQLite WAL 测试并行关闭连接造成超时。每个测试内部的并发请求、读写和冲突检查仍照常执行。macOS / Linux 全量回归步骤的 10 分钟上限包含编译时间，外围测试 job 仍限制为 20 分钟；不以超时设置跳过测试或放宽断言。
 统计数据库测试与代理一样复用同一 Writer 及其共享连接，保留并发 Ticket 的最终写入验证，避免异步写入期间反复创建、关闭独立 WAL 写连接。
 
 Codex 的自动测试使用隔离 HOME、模拟登录凭据和本地上游，不读取真实账号。默认账号切换 fixture 显式提供停止状态的 daemon 查询，避免依赖 PATH 中真实 Codex 的后台状态；运行中 daemon 的重启另有独立 fixture 覆盖。可另行安装 Codex CLI 后运行真实进程冒烟测试（无 API 调用费用）：
@@ -33,7 +33,7 @@ SMOKE_FORMAT=openai-chat python3 tests/fixtures/codex_cli_smoke.py
 
 TUI 按状态、事件、页面、表单、模型规则、布局和后台任务拆分在 `src/tui/`；CLI 与 TUI 共用 `src/sync.rs` 的同步服务。回归测试包含真实事件序列、延迟本地 API、同步失败恢复、并发编辑及 120×36 到 40×12 的布局检查。
 
-Pulse 账号协调回归在隔离子进程中运行，使用受控慢 executor 驱动真实本地采集，覆盖迟到结果、身份代际、串行调度与缓存恢复；父测试不改进程全局 HOME。Git 请求入队失败原值返回，保留 Diff / Action 所有权；`request`、`execute` 的 `result_large_err` 例外各自注明原因，不以装箱增加失败路径分配。
+Pulse 账号协调回归在隔离子进程中运行，使用受控慢 executor 驱动真实本地采集，覆盖迟到结果、身份代际、串行调度与缓存恢复；父测试不改进程全局 HOME。Git 请求入队失败原值返回，保留 Diff / Action 所有权；`request`、`execute` 的 `result_large_err` 例外各自注明原因，不以装箱增加失败路径分配。确认说明使用不可变 `Box<str>` 紧凑保存，Action 仍按值保留，不装箱整个操作或克隆 Diff。
 
 ### Docker 安全回归
 

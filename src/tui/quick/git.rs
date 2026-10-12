@@ -38,7 +38,7 @@ enum Modal {
     },
     Confirm {
         action: Action,
-        description: String,
+        description: Box<str>,
     },
     Message(String),
     OperationResult {
@@ -1052,7 +1052,7 @@ impl GitPane {
         };
         self.modal = Some(Modal::Confirm {
             action,
-            description,
+            description: description.into_boxed_str(),
         });
         self.scroll = 0;
         self.pin();

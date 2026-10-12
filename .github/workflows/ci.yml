@@ -53,7 +53,7 @@ jobs:
         # Independent subprocess/file-lock tests can contend, and SQLite WAL
         # tests can deadlock on macOS. Tests retain their internal concurrency.
         run: cargo test --locked --all-targets --all-features -- --test-threads=1
-        timeout-minutes: 5
+        timeout-minutes: 10
 
   msrv:
     timeout-minutes: 20
