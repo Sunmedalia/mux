@@ -209,9 +209,17 @@ enum Action {
     BackQuit,
     Search,
     SessionScope,
+    SessionCharts,
     Activate(usize),
 }
 impl UsagePage {
+    pub(super) fn jump_to_session_charts(&mut self) {
+        self.section = 5;
+        self.scroll = 0;
+        let mut state = self.dashboard.borrow_mut();
+        state.jump = Some(4);
+        state.reveal = None;
+    }
     pub(super) fn jump_to_section(&mut self) {
         self.dashboard.borrow_mut().jump = Some(self.section);
     }
@@ -838,6 +846,7 @@ struct Data<'a> {
     models: Vec<ModelRow>,
     history: Vec<(String, Totals)>,
     sessions: Vec<&'a crate::sessions::Session>,
+    session_charts: Option<(Vec<Line<'static>>, Vec<Line<'static>>)>,
     daily: Totals,
     total: Totals,
     compact: Totals,
@@ -1452,7 +1461,7 @@ impl App {
                     " · {} · {}",
                     page.client().unwrap_or("All agents"),
                     if page.session_follow_range {
-                        "Follow period"
+                        "List: last active in period"
                     } else {
                         "All dates"
                     }
@@ -1461,7 +1470,23 @@ impl App {
         });
         y += 1;
         c.content(x, y, width, || {
-            muted("Lifetime tokens · independent of gateway").into()
+            let total = d
+                .sessions
+                .iter()
+                .filter(|s| s.tokens.known)
+                .fold(0i64, |total, s| total.saturating_add(s.tokens.total()));
+            let partial = d.sessions.iter().any(|s| !s.tokens.known || s.incomplete);
+            Line::from(vec![
+                value(
+                    format!(
+                        "{}{} lifetime tokens",
+                        compact(total),
+                        if partial { " + ?" } else { "" }
+                    ),
+                    ROUTE,
+                ),
+                muted(" · independent of gateway"),
+            ])
         });
         y += 1;
         if page.session_searching || !page.session_search.is_empty() {
@@ -1489,6 +1514,31 @@ impl App {
                     ),
                 ])
             });
+            y += 1;
+        }
+        c.state.anchors[4] = 0;
+        if let Some((tokens, active)) = &d.session_charts {
+            c.bottom(x, y, width);
+            y += 2;
+            c.state.anchors[4] = y;
+            let chart_width = if width >= 100 { (width - 2) / 2 } else { width };
+            let mut paint = |cx, cy, title, lines: &[Line<'static>]| {
+                c.header(cx, cy, chart_width, title, None);
+                for (index, line) in lines.iter().enumerate() {
+                    c.content(cx, cy + 1 + index, chart_width, || line.clone());
+                }
+                c.bottom(cx, cy + 1 + lines.len(), chart_width);
+                lines.len() + 2
+            };
+            let height = paint(x, y, "TREND / SESSION TOKENS", tokens);
+            if width >= 100 {
+                let other = paint(x + chart_width + 2, y, "TREND / ACTIVE SESSIONS", active);
+                y += height.max(other) + 1;
+            } else {
+                y += height + 1;
+                y += paint(x, y, "TREND / ACTIVE SESSIONS", active) + 1;
+            }
+            c.header(x, y, width, "SESSION HISTORY", None);
             y += 1;
         }
         let split = width >= 100;
@@ -1647,11 +1697,7 @@ fn control_rows(inner: Rect, page: &UsagePage) -> (Vec<(String, Action, Rect)>, 
             ("Today [t]".into(), Action::Today),
         ]);
     }
-    if page.source == UsageSource::Gateway || page.session_follow_range {
-        groups.push(dates);
-    } else {
-        groups.truncate(2);
-    }
+    groups.push(dates);
     if page.source == UsageSource::Gateway
         && let Some(provider) = &page.provider
     {
@@ -1732,6 +1778,7 @@ fn footer_controls(area: Rect, page: &UsagePage) -> Vec<(String, Action, Rect)> 
         ]
     } else if page.source == UsageSource::Sessions {
         vec![
+            ("Charts c", "c", Action::SessionCharts),
             ("Search /", "Find", Action::Search),
             ("Open ↵", "Open", Action::Activate(5)),
             (
@@ -1749,7 +1796,7 @@ fn footer_controls(area: Rect, page: &UsagePage) -> Vec<(String, Action, Rect)> 
                 } else {
                     "All dates f"
                 },
-                "Dates",
+                "Date",
                 Action::SessionScope,
             ),
             ("Reset x", "x", Action::Reset),
@@ -1887,11 +1934,30 @@ impl App {
             inner.width.saturating_sub(1),
             inner.height.saturating_sub(height + footer_height),
         );
+        let sessions = self.session_rows(page);
+        let session_charts =
+            if page.source == UsageSource::Sessions && !page.session_detail && !sessions.is_empty()
+            {
+                let chart_width = if viewport.width >= 100 {
+                    (viewport.width - 2) / 2
+                } else {
+                    viewport.width
+                };
+                Some(chart::session_charts(
+                    &sessions,
+                    &self.usage.snapshot,
+                    page,
+                    chart_width.saturating_sub(2),
+                ))
+            } else {
+                None
+            };
         let d = Data {
+            session_charts,
             providers: self.usage_providers(page),
             models: self.usage_models(page),
             history: self.usage_history(page),
-            sessions: self.session_rows(page),
+            sessions,
             daily: page.range_total(
                 &self.usage.snapshot,
                 page.client(),
@@ -2132,6 +2198,12 @@ impl App {
                             page.section = 5;
                             page.jump_to_section();
                         }
+                        Action::SessionCharts => {
+                            page.key(
+                                KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE),
+                                &self.usage.snapshot,
+                            );
+                        }
                         Action::Sort => page.session_sort_tokens = !page.session_sort_tokens,
                         Action::Client(client) => {
                             page.client = client;
@@ -2352,6 +2424,8 @@ mod tests {
                 .as_deref(),
             Some("unrelated-gateway")
         );
+        render(&mut app, 80, 24, "sessions-overview");
+        key(&mut app, KeyCode::Home);
         let before = render(&mut app, 80, 24, "sessions");
         assert!(text(&before).contains("local-se"));
         assert!(text(&before).contains("1,020"));
@@ -2680,5 +2754,71 @@ mod tests {
             text(&render(&mut app, 80, 24, "pi-empty"))
                 .contains("Pi local sessions are not supported")
         );
+    }
+    #[test]
+    fn session_trends_render_and_chart_button_preserves_selection() {
+        let (_temp, mut app) = fixture();
+        key(&mut app, KeyCode::Char('6'));
+        app.usage.snapshot.offset = 0;
+        let page = app.usage.page.as_mut().unwrap();
+        page.day = "2026-09-18".into();
+        page.follow_today = false;
+        let timestamp = chrono::DateTime::parse_from_rfc3339("2026-09-18T03:00:00Z")
+            .unwrap()
+            .timestamp();
+        app.usage.sessions.rows[0].activity = [(timestamp, 500), (timestamp + 3600, 520)].into();
+        app.usage.sessions.rows[1].activity = [(timestamp, 10020)].into();
+        for (width, height) in [(40, 12), (80, 24), (120, 36)] {
+            key(&mut app, KeyCode::Char('c'));
+            let buffer = render(&mut app, width, height, "session-trends");
+            if width >= 80 {
+                assert!(text(&buffer).contains("TREND / SESSION TOKENS"));
+            }
+            if width >= 120 {
+                assert!(text(&buffer).contains("TREND / ACTIVE SESSIONS"));
+            }
+            key(&mut app, KeyCode::End);
+            render(&mut app, width, height, "session-history");
+            let selected = app.usage.page.as_ref().unwrap().dashboard.borrow().selected[5].clone();
+            let controls = app
+                .usage
+                .page
+                .as_ref()
+                .unwrap()
+                .dashboard
+                .borrow()
+                .controls
+                .clone();
+            let chart_button = controls
+                .iter()
+                .find(|(_, action)| matches!(action, Action::SessionCharts))
+                .unwrap()
+                .0;
+            assert!(
+                controls
+                    .iter()
+                    .any(|(_, action)| matches!(action, Action::BackQuit))
+            );
+            app.usage_mouse(
+                MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: chart_button.x,
+                    row: chart_button.y,
+                    modifiers: KeyModifiers::NONE,
+                },
+                Rect::new(0, 0, width, height),
+            );
+            render(&mut app, width, height, "return-charts");
+            let page = app.usage.page.as_ref().unwrap();
+            assert_eq!(
+                page.dashboard.borrow().effective_scroll,
+                page.dashboard.borrow().anchors[4].min(page.limit.get())
+            );
+            assert_eq!(page.dashboard.borrow().selected[5], selected);
+        }
+        app.usage.page.as_mut().unwrap().client = 1;
+        let buffer = render(&mut app, 120, 36, "claude-trends");
+        assert!(text(&buffer).contains("peak 520"));
+        assert!(!text(&buffer).contains("peak 10520"));
     }
 }

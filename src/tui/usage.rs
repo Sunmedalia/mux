@@ -351,6 +351,9 @@ impl UsagePage {
                 };
                 self.scroll = 0;
             }
+            KeyCode::Char('c') if self.source == UsageSource::Sessions => {
+                self.jump_to_session_charts();
+            }
             KeyCode::Char('c' | 'v') if self.source == UsageSource::Gateway => {
                 self.chart_tokens = key.code == KeyCode::Char('v');
                 self.section = 4;

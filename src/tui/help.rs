@@ -272,7 +272,14 @@ pub(super) fn help_commands(section: HelpSection) -> &'static [(&'static str, &'
                 "Enter / l",
                 "Provider: filter & models; History: date & chart; Session: inspect",
             ),
-            ("c / v", "Calls / tokens chart"),
+            (
+                "c / v",
+                "Gateway: calls / tokens chart; Sessions c: return to trends",
+            ),
+            (
+                "Session trends",
+                "Recorded tokens and unique active sessions per bar; follow period, agent and search",
+            ),
             (
                 "/",
                 "Open Sessions search: title, project, full session ID or model",

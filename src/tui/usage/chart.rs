@@ -139,6 +139,16 @@ pub(super) fn lines(
             }
         })
         .collect();
+    plot(&series, &values, group, tokens, width)
+}
+
+fn plot(
+    series: &Series,
+    values: &[Option<u64>],
+    group: usize,
+    tokens: bool,
+    width: u16,
+) -> Vec<Line<'static>> {
     let peak = values.iter().flatten().copied().max().unwrap_or(0);
     let step = series.step * group;
     let color = if tokens { ROUTE } else { ENABLED };
@@ -160,7 +170,7 @@ pub(super) fn lines(
     let cell_width = (usize::from(width) / values.len().max(1)).max(1);
     for row in (0..6).rev() {
         let mut spans = vec![];
-        for value in &values {
+        for value in values {
             let units = value.map_or(0, |v| {
                 if peak == 0 {
                     0
@@ -213,7 +223,7 @@ pub(super) fn lines(
     };
     let occupied = series.first.len() + middle.len() + series.last.len();
     let spaces = usize::from(width).saturating_sub(occupied);
-    out.push(Line::styled(
+    let ticks = if usize::from(width) >= occupied {
         format!(
             "{}{}{}{}{}",
             series.first,
@@ -221,9 +231,18 @@ pub(super) fn lines(
             middle,
             " ".repeat(spaces - spaces / 2),
             series.last
-        ),
-        Style::default().fg(MUTED),
-    ));
+        )
+    } else if usize::from(width) > series.first.len() + series.last.len() {
+        format!(
+            "{}{}{}",
+            series.first,
+            " ".repeat(usize::from(width) - series.first.len() - series.last.len()),
+            series.last
+        )
+    } else {
+        series.first.chars().take(usize::from(width)).collect()
+    };
+    out.push(Line::styled(ticks, Style::default().fg(MUTED)));
     out.push(Line::styled(
         if tokens {
             "0 known zero · ? usage unknown"
@@ -233,6 +252,189 @@ pub(super) fn lines(
         Style::default().fg(MUTED),
     ));
     out
+}
+
+struct SessionSeries {
+    axis: Series,
+    tokens: Vec<u64>,
+    active: Vec<BTreeSet<usize>>,
+    partial: usize,
+    has_activity: bool,
+}
+
+fn session_series(
+    rows: &[&crate::sessions::Session],
+    snapshot: &Snapshot,
+    page: &UsagePage,
+) -> SessionSeries {
+    let zone = chrono::FixedOffset::east_opt(snapshot.offset)
+        .unwrap_or_else(|| chrono::FixedOffset::east_opt(0).unwrap());
+    let hourly = page.range == 0;
+    let today = snapshot.today();
+    let end =
+        NaiveDate::parse_from_str(if page.range == 3 { &today } else { &page.day }, "%Y-%m-%d")
+            .unwrap();
+    let start = page
+        .start_day()
+        .and_then(|day| NaiveDate::parse_from_str(&day, "%Y-%m-%d").ok())
+        .or_else(|| {
+            rows.iter()
+                .flat_map(|s| s.activity.keys())
+                .filter_map(|timestamp| chrono::DateTime::from_timestamp(*timestamp, 0))
+                .map(|time| time.with_timezone(&zone).date_naive())
+                .filter(|day| *day <= end)
+                .min()
+        })
+        .unwrap_or(end);
+    let hours = if hourly && page.day == today {
+        chrono::Utc::now().with_timezone(&zone).hour() as usize + 1
+    } else {
+        24
+    };
+    let count = if hourly {
+        hours
+    } else {
+        (end - start).num_days().max(0) as usize + 1
+    };
+    let step = count.div_ceil(256).max(1);
+    let mut tokens = vec![0u64; count.div_ceil(step)];
+    let mut active = vec![BTreeSet::new(); tokens.len()];
+    let mut has_activity = false;
+    for (index, session) in rows.iter().enumerate() {
+        for (&timestamp, &amount) in &session.activity {
+            let Some(time) = chrono::DateTime::from_timestamp(timestamp, 0) else {
+                continue;
+            };
+            let local = time.with_timezone(&zone);
+            let day = local.date_naive();
+            if day < start || day > end {
+                continue;
+            }
+            let bin = if hourly {
+                local.hour() as usize
+            } else {
+                (day - start).num_days() as usize
+            };
+            if bin >= count {
+                continue;
+            }
+            tokens[bin / step] = tokens[bin / step].saturating_add(amount.max(0) as u64);
+            active[bin / step].insert(index);
+            has_activity = true;
+        }
+    }
+    let partial = rows
+        .iter()
+        .filter(|s| {
+            !s.tokens.known || s.incomplete || (s.tokens.total() > 0 && s.activity.is_empty())
+        })
+        .count();
+    SessionSeries {
+        axis: Series {
+            bins: vec![],
+            start,
+            hourly,
+            step,
+            first: if hourly {
+                "00:00".into()
+            } else {
+                start.format("%m/%d").to_string()
+            },
+            last: if hourly {
+                format!("{:02}:00", hours - 1)
+            } else {
+                end.format("%m/%d").to_string()
+            },
+        },
+        tokens,
+        active,
+        partial,
+        has_activity,
+    }
+}
+
+pub(super) fn session_charts(
+    rows: &[&crate::sessions::Session],
+    snapshot: &Snapshot,
+    page: &UsagePage,
+    width: u16,
+) -> (Vec<Line<'static>>, Vec<Line<'static>>) {
+    let series = session_series(rows, snapshot, page);
+    (
+        session_lines(rows, &series, true, width),
+        session_lines(rows, &series, false, width),
+    )
+}
+
+fn session_lines(
+    rows: &[&crate::sessions::Session],
+    series: &SessionSeries,
+    tokens: bool,
+    width: u16,
+) -> Vec<Line<'static>> {
+    if rows.is_empty() {
+        return vec![Line::styled(
+            "No matching sessions",
+            Style::default().fg(MUTED),
+        )];
+    }
+    if !series.has_activity && series.partial > 0 {
+        return vec![
+            Line::styled(
+                "Activity timestamps unavailable",
+                Style::default().fg(WARNING),
+            ),
+            Line::styled(
+                "See lifetime totals in the list",
+                Style::default().fg(MUTED),
+            ),
+        ];
+    }
+    let group = series
+        .tokens
+        .len()
+        .div_ceil(usize::from(width / 2).max(1))
+        .max(1);
+    let values: Vec<_> = if tokens {
+        series
+            .tokens
+            .chunks(group)
+            .map(|chunk| Some(chunk.iter().copied().fold(0u64, u64::saturating_add)))
+            .collect()
+    } else {
+        series
+            .active
+            .chunks(group)
+            .map(|chunk| {
+                let unique: BTreeSet<_> =
+                    chunk.iter().flat_map(|set| set.iter().copied()).collect();
+                Some(unique.len() as u64)
+            })
+            .collect()
+    };
+    let mut lines = plot(&series.axis, &values, group, tokens, width);
+    if !tokens {
+        lines[0].spans[0].content = if width >= 40 {
+            "ACTIVE SESSIONS"
+        } else {
+            "SESSIONS"
+        }
+        .into();
+    }
+    let note = if series.partial > 0 {
+        format!("Partial activity · {} sessions", series.partial)
+    } else if tokens {
+        "Recorded tokens · selected period".into()
+    } else {
+        "Unique sessions · not gateway calls".into()
+    };
+    if let Some(last) = lines.last_mut() {
+        *last = Line::styled(
+            note,
+            Style::default().fg(if series.partial > 0 { WARNING } else { MUTED }),
+        );
+    }
+    lines
 }
 
 #[cfg(test)]
@@ -334,5 +536,111 @@ mod tests {
             0
         );
         assert!(series(&snapshot, &page).bins.iter().all(|b| b.calls == 0));
+    }
+    #[test]
+    fn session_activity_uses_local_time_and_deduplicates_sessions_per_bar() {
+        let (_temp, mut app) = crate::tui::tests::persisted_app();
+        app.open_usage();
+        let mut page = app.usage.page.take().unwrap();
+        page.day = "2026-09-18".into();
+        page.follow_today = false;
+        let snapshot = Snapshot {
+            offset: 8 * 3600,
+            ..Default::default()
+        };
+        let stamp = |text: &str| {
+            chrono::DateTime::parse_from_rfc3339(text)
+                .unwrap()
+                .timestamp()
+        };
+        let mut first = crate::sessions::Session {
+            client: "Claude",
+            id: "same-id".into(),
+            tokens: crate::sessions::Tokens {
+                input: 100,
+                known: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        first.activity = [
+            (stamp("2026-09-17T17:00:00Z"), 20),
+            (stamp("2026-09-17T17:30:00Z"), 30),
+            (stamp("2026-09-17T20:00:00Z"), 50),
+            (stamp("2026-09-17T15:00:00Z"), 700),
+        ]
+        .into();
+        let mut second = first.clone();
+        second.client = "Codex";
+        second.activity = [(stamp("2026-09-17T17:45:00Z"), 40)].into();
+        let rows = [&first, &second];
+        let series = session_series(&rows, &snapshot, &page);
+        assert_eq!(series.tokens.len(), 24);
+        assert_eq!(series.tokens[1], 90);
+        assert_eq!(series.tokens[4], 50);
+        assert_eq!(series.tokens[0], 0);
+        assert_eq!(series.active[1].len(), 2);
+        assert_eq!(series.active[4].len(), 1);
+        let (tokens, active) = session_charts(&rows, &snapshot, &page, 8);
+        assert!(tokens[0].to_string().contains("peak 140"));
+        assert!(active[0].to_string().contains("peak 2"));
+        // Daily buckets include activity on the previous day, without using lifetime totals.
+        page.range = 1;
+        let series = session_series(&rows, &snapshot, &page);
+        assert_eq!(series.tokens.len(), 7);
+        assert_eq!(series.tokens[5], 700);
+        assert_eq!(series.tokens[6], 140);
+        page.range = 3;
+        assert_eq!(
+            session_series(&rows, &snapshot, &page)
+                .tokens
+                .iter()
+                .sum::<u64>(),
+            840
+        );
+    }
+
+    #[test]
+    fn session_charts_explain_missing_partial_and_quiet_activity() {
+        let (_temp, mut app) = crate::tui::tests::persisted_app();
+        app.open_usage();
+        let mut page = app.usage.page.take().unwrap();
+        page.day = "2026-09-18".into();
+        page.follow_today = false;
+        let snapshot = Snapshot {
+            offset: 0,
+            ..Default::default()
+        };
+        let mut session = crate::sessions::Session {
+            tokens: crate::sessions::Tokens {
+                input: 100,
+                known: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let (tokens, _) = session_charts(&[&session], &snapshot, &page, 36);
+        assert!(tokens[0].to_string().contains("unavailable"));
+        session.activity.insert(
+            chrono::DateTime::parse_from_rfc3339("2026-09-18T01:00:00Z")
+                .unwrap()
+                .timestamp(),
+            80,
+        );
+        session.incomplete = true;
+        let (tokens, _) = session_charts(&[&session], &snapshot, &page, 36);
+        assert!(
+            tokens
+                .last()
+                .unwrap()
+                .to_string()
+                .contains("Partial activity")
+        );
+        session.incomplete = false;
+        page.day = "2026-09-19".into();
+        let (tokens, active) = session_charts(&[&session], &snapshot, &page, 36);
+        assert!(tokens[0].to_string().contains("peak 0"));
+        assert!(active[0].to_string().contains("peak 0"));
+        assert!(!tokens.iter().any(|line| line.to_string().contains('█')));
     }
 }
