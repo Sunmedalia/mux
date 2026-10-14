@@ -4,7 +4,7 @@
 
 面向 Windows 10 22H2 / Windows 11 x64。ZIP 包含 `mux.exe`、本文和许可证。Mux 自身不需要 Rust、Node、Git Bash 或额外安装 Visual C++ 运行库。管理已安装客户端时，该客户端仍需自己的运行环境。
 
-v0.1.21 不提供 Windows Release 二进制，Windows 源码支持与 CI 验证保留；使用本版请按下方源码构建说明安装。以下 ZIP 操作适用于历史 Windows Release 或分支 CI 生成的归档，旧版程序不包含本版的 Pulse 改进。
+v0.1.22 不提供 Windows Release 二进制，Windows 源码支持与 CI 验证保留；使用本版请按下方源码构建说明安装。以下 ZIP 操作适用于历史 Windows Release 或分支 CI 生成的归档，旧版程序不包含本版的 Pulse 改进。
 
 ## 解压运行
 

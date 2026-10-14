@@ -25,9 +25,9 @@ mux migrate --config /path/to/old/config.toml --state-dir /path/to/old/state --c
 - 在 TUI 中管理厂商、模型目录、默认模型、角色别名与 1M 上下文。
 - 将所有已启用模型聚合到 Claude 原生 `/model`，并实时同步启用状态。
 - 把 Anthropic Messages 请求转发到 Anthropic、OpenAI Chat Completions 或 Responses 兼容网关。
-- 在 Herdr 常驻侧栏中查看网关与会话用量，并完成 Git Diff、暂存、提交、分支、远端操作和提交历史搜索。
+- 在 Herdr 常驻侧栏中查看网关与会话用量，完成 Git Diff、暂存、提交、分支、远端操作和历史搜索，并浏览与管理项目文件。
 
-> v0.1.21 改进 Pulse 的 Git 确认安全、提交失败恢复、可信用量展示、窄屏交互和后台刷新，详细变化见 [发布说明](docs/releases/v0.1.21.md)。本次提供 macOS ARM64、Linux x86_64/ARM64 预编译包；Windows 保留源码支持与 CI 验证，不提供本版 Release 二进制。Herdr 插件支持 macOS / Linux。Pi 可使用本地 Proxy API；四类客户端的 Provider 都支持单独配置模型目录地址。
+> v0.1.22 新增 Pulse File 文件管理和新 tab 编辑文件，统一 Token / Git / File 导航，重做 Git Actions、分支菜单、Log 与提交详情，并改进会话统计、活动趋势与中英文帮助。详细变化见 [发布说明](docs/releases/v0.1.22.md)。本次提供 macOS ARM64、Linux x86_64/ARM64 预编译包；Windows 保留源码支持与 CI 验证，不提供本版 Release 二进制。Herdr 插件支持 macOS / Linux。Pi 可使用本地 Proxy API；四类客户端的 Provider 都支持单独配置模型目录地址。
 
 [快速开始](#快速开始) · [快捷键](docs/navigation.md#tui-导航) · [Codex 配置与账号](docs/clients.md#codex-配置与账号) · [Pi Agent 配置](docs/clients.md#pi-agent-配置) · [Grok 配置](docs/clients.md#grok-配置) · [模型参数](docs/clients.md#模型-token-参数) · [同步](docs/clients.md#claude-model-同步) · [端口设置](docs/proxy.md#修改本地代理端口--多系统用户) · [Herdr Pulse](docs/pulse.md#herdr-pulse-常驻监控) · [卸载](docs/operations.md#卸载与配置清理) · [开发与测试](docs/development.md#开发)
 

@@ -1,3 +1,4 @@
+use super::quick::file_icons::IconMode;
 use super::*;
 
 #[derive(Clone)]
@@ -12,6 +13,8 @@ pub(super) struct SettingsMenu {
     saved_theme: theme::Theme,
     pulse: theme::PulseTheme,
     saved_pulse: theme::PulseTheme,
+    file_icons: IconMode,
+    saved_file_icons: IconMode,
     refresh: u64,
     saved_refresh: u64,
     reasoning: Option<String>,
@@ -24,6 +27,7 @@ impl SettingsMenu {
         self.draft != self.original
             || self.theme != self.saved_theme
             || self.pulse != self.saved_pulse
+            || self.file_icons != self.saved_file_icons
             || self.refresh != self.saved_refresh
             || self.reasoning != self.saved_reasoning
     }
@@ -52,6 +56,14 @@ impl SettingsMenu {
                     ("Model details", o.value(1)),
                     ("Start page", o.value(2)),
                     ("Sessions sort", o.value(3)),
+                    (
+                        "File icons",
+                        match self.file_icons {
+                            IconMode::Nerd => "Nerd",
+                            IconMode::Unicode => "Unicode",
+                        }
+                        .into(),
+                    ),
                 ]
             }
             2 => vec![("Refresh interval", format!("{}s", self.refresh))],
@@ -78,6 +90,7 @@ impl SettingsMenu {
         match self.selected {
             0 => cycle(&mut self.theme, &theme::Theme::ALL, forward),
             1 if self.row == 0 => cycle(&mut self.pulse, &theme::PulseTheme::ALL, forward),
+            1 if self.row == 5 => self.file_icons.toggle(),
             1 | 3 => {
                 let mut o = UiOptions {
                     kind: if self.selected == 1 {
@@ -418,6 +431,7 @@ pub(super) fn draw_menu(frame: &mut ratatui::Frame, area: Rect, menu: &SettingsM
                     "Expand per-model token usage",
                     "Page shown when Pulse opens",
                     "Order sessions by activity or token usage",
+                    "Nerd Font glyphs or Unicode emoji for File",
                 ],
                 2 => &["How often Usage requests fresh data"],
                 3 => &[
@@ -508,6 +522,7 @@ impl UiOptions {
                 config::PulseStartPage::Sessions => "Sessions",
                 config::PulseStartPage::Charts => "Charts",
                 config::PulseStartPage::Git => "Git",
+                config::PulseStartPage::File => "File",
             }
             .into(),
             (OptionsKind::Pulse, _) => if self.edited.pulse_sort_tokens {
@@ -552,8 +567,9 @@ impl UiOptions {
                 self.edited.pulse_start_page = match (self.edited.pulse_start_page, forward) {
                     (Home, true) | (Charts, false) => Sessions,
                     (Sessions, true) | (Git, false) => Charts,
-                    (Charts, true) | (Home, false) => Git,
-                    (Git, true) | (Sessions, false) => Home,
+                    (Charts, true) | (File, false) => Git,
+                    (Git, true) | (Home, false) => File,
+                    (File, true) | (Sessions, false) => Home,
                 };
             }
             (OptionsKind::Pulse, _) => {
@@ -671,6 +687,7 @@ impl App {
         self.config.ui = global.ui;
         self.config.usage_refresh_secs = global.usage_refresh_secs;
         self.config.codex.reasoning_effort = global.codex.reasoning_effort;
+        let file_icons = IconMode::load(&self.paths.state_dir.join("pulse-file-icons.json"));
         let menu = SettingsMenu {
             selected: 0,
             editing: false,
@@ -681,6 +698,8 @@ impl App {
             saved_theme: self.theme,
             pulse: theme::PulseTheme::load(&self.paths),
             saved_pulse: theme::PulseTheme::load(&self.paths),
+            file_icons,
+            saved_file_icons: file_icons,
             refresh: self.config.usage_refresh_secs,
             saved_refresh: self.config.usage_refresh_secs,
             reasoning: self.config.codex.reasoning_effort.clone(),
@@ -823,6 +842,18 @@ impl App {
                         Err(error) => failures.push(format!("Pulse theme: {error}")),
                     }
                 }
+                if menu.file_icons != menu.saved_file_icons {
+                    match menu
+                        .file_icons
+                        .save(&self.paths.state_dir.join("pulse-file-icons.json"))
+                    {
+                        Ok(()) => {
+                            menu.saved_file_icons = menu.file_icons;
+                            saved_groups.push("File icons");
+                        }
+                        Err(error) => failures.push(format!("File icons: {error}")),
+                    }
+                }
                 menu.message = Some(if failures.is_empty() {
                     "Saved · all changes are up to date".into()
                 } else if saved_groups.is_empty() {
@@ -850,6 +881,7 @@ impl App {
                 menu.draft = menu.original.clone();
                 menu.theme = menu.saved_theme;
                 menu.pulse = menu.saved_pulse;
+                menu.file_icons = menu.saved_file_icons;
                 menu.refresh = menu.saved_refresh;
                 menu.reasoning = menu.saved_reasoning.clone();
                 menu.message = Some("Unsaved changes discarded".into());
@@ -1007,6 +1039,77 @@ impl App {
 mod preview_tests {
     use super::*;
     use ratatui::{Terminal, backend::TestBackend};
+
+    #[test]
+    fn file_icons_settings_preserve_saved_mode_discard_and_retry_failed_save() {
+        let (_temp, mut app) = crate::tui::tests::persisted_app();
+        let path = app.paths.state_dir.join("pulse-file-icons.json");
+        IconMode::Unicode.save(&path).unwrap();
+        app.open_settings_menu();
+        app.handle_key(KeyEvent::new(KeyCode::Char(']'), KeyModifiers::NONE))
+            .unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE))
+            .unwrap();
+        for _ in 0..5 {
+            app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))
+                .unwrap();
+        }
+        let Some(Modal::SettingsMenu(menu)) = &app.modal else {
+            panic!()
+        };
+        assert_eq!((menu.selected, menu.row), (1, 5));
+        assert_eq!(menu.file_icons, IconMode::Unicode);
+        for (width, height) in [(40, 12), (80, 24), (120, 36)] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal.draw(|f| app.draw(f)).unwrap();
+            let text: String = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect();
+            assert!(
+                text.contains("File icons") && text.contains("Unicode"),
+                "{width}x{height}: {text}"
+            );
+        }
+        app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE))
+            .unwrap();
+        assert_eq!(IconMode::load(&path), IconMode::Unicode);
+        app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL))
+            .unwrap();
+        let Some(Modal::SettingsMenu(menu)) = &app.modal else {
+            panic!()
+        };
+        assert_eq!(menu.file_icons, IconMode::Unicode);
+        assert!(!menu.dirty());
+        app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))
+            .unwrap();
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
+            .unwrap();
+        let Some(Modal::SettingsMenu(menu)) = &app.modal else {
+            panic!()
+        };
+        assert_eq!(menu.file_icons, IconMode::Nerd);
+        assert!(menu.dirty());
+        assert!(menu.message.as_deref().unwrap().contains("File icons:"));
+        std::fs::remove_dir(&path).unwrap();
+        app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL))
+            .unwrap();
+        assert_eq!(IconMode::load(&path), IconMode::Nerd);
+        let Some(Modal::SettingsMenu(menu)) = &app.modal else {
+            panic!()
+        };
+        assert!(!menu.dirty());
+        app.open_settings_menu();
+        let Some(Modal::SettingsMenu(menu)) = &app.modal else {
+            panic!()
+        };
+        assert_eq!(menu.file_icons, IconMode::Nerd);
+    }
 
     #[test]
     fn settings_theme_samples_fit_and_pulse_colors_are_independent() {

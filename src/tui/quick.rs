@@ -21,6 +21,8 @@ pub(super) const RAIL: Color = Color::Rgb(48, 67, 84);
 const LABEL: &str = "Mux Pulse";
 mod accounts;
 mod collector;
+pub(super) mod file_icons;
+mod files;
 mod focus;
 mod git;
 mod help;
@@ -115,7 +117,9 @@ pub(super) fn run(paths: AppPaths) -> Result<()> {
         monitor.apply_preferences(config.ui);
         monitor.apply_start_page();
     }
+    monitor.files.refresh_icon_mode(&theme_paths);
     monitor.git.start();
+    monitor.files.start();
     let session_refresh = spawn_session_reader(session_send);
     let mut redraw = true;
     let mut last_theme_check = Instant::now();
@@ -125,7 +129,11 @@ pub(super) fn run(paths: AppPaths) -> Result<()> {
     let mut switching: Option<mpsc::Receiver<std::result::Result<String, String>>> = None;
     loop {
         redraw |= monitor.git.poll();
+        redraw |= monitor
+            .files
+            .poll(monitor.page == config::PulseStartPage::File);
         if last_theme_check.elapsed() >= Duration::from_secs(2) {
+            redraw |= monitor.files.refresh_icon_mode(&theme_paths);
             let theme = theme::PulseTheme::load(&theme_paths);
             if monitor.pulse_theme != theme {
                 monitor.pulse_theme = theme;
@@ -236,6 +244,15 @@ pub(super) fn run(paths: AppPaths) -> Result<()> {
         if let Event::Key(key) = &input
             && monitor.workspace_shortcut(*key)
         {
+            continue;
+        }
+        if monitor.workspace_mouse(&input, screen) {
+            continue;
+        }
+        if monitor.page == config::PulseStartPage::File {
+            if !monitor.files.input(&input) {
+                monitor.return_home();
+            }
             continue;
         }
         if monitor.page == config::PulseStartPage::Git {
@@ -356,11 +373,7 @@ pub(super) fn run(paths: AppPaths) -> Result<()> {
                 let size = terminal.size()?;
                 let screen = Rect::new(0, 0, size.width, size.height);
                 let mini = screen.width < 32 || screen.height < 12;
-                let area = if mini {
-                    screen
-                } else {
-                    screen.inner(Margin::new(2, 0))
-                };
+                let area = screen;
                 let body = if mini {
                     mini_body(area)
                 } else {
@@ -459,6 +472,7 @@ pub(super) fn run(paths: AppPaths) -> Result<()> {
                 continue;
             }
             match key.code {
+                KeyCode::Char('H') => monitor.return_home(),
                 KeyCode::Char('q') if monitor.page != config::PulseStartPage::Home => {
                     monitor.return_home()
                 }
@@ -1508,15 +1522,15 @@ mod tests {
                 Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
             monitor.scroll = u16::MAX;
             terminal.draw(|frame| monitor.draw(frame)).unwrap();
-            let body = content_body(area.inner(Margin::new(2, 0)));
+            let body = content_body(area);
             assert!(monitor.limit > 0);
             assert_eq!(monitor.scroll, monitor.limit);
-            let bottom = &terminal.backend().buffer()[(area.right() - 3, body.bottom() - 1)];
+            let bottom = &terminal.backend().buffer()[(area.right() - 1, body.bottom() - 1)];
             assert_eq!(bottom.fg, BLUE, "{width}x{height}: bottom of thumb");
             let top: String = (0..width)
                 .map(|x| terminal.backend().buffer()[(x, 0)].symbol())
                 .collect();
-            assert!(top.contains("TOKEN") && top.contains("[Git(g)]"));
+            assert!(top.contains("TOKEN") && top.contains("GIT"));
             assert!(!top.contains("Mux"));
         }
     }
@@ -1812,8 +1826,12 @@ mod tests {
                     .map(|x| terminal.backend().buffer()[(x, y)].symbol())
                     .collect::<String>()
             };
-            assert!(row(0).contains("TOKEN"));
-            assert!(row(0).contains("[Git(g)]"));
+            assert!(row(0).contains(if width == 20 { "[T]" } else { "TOKEN" }));
+            let git_label = match width {
+                20 => "GIT",
+                _ => "[GIT]",
+            };
+            assert!(row(0).contains(git_label));
             assert!(!row(0).contains('●') && !row(0).contains('○'));
             let (header, reserve) = pulse_header_area(Rect::new(0, 0, width, height));
             let parts = page_header_rects(header, reserve, false);
@@ -1831,19 +1849,78 @@ mod tests {
             }
             assert!(!row(height - 1).contains("GIT"));
             let mini = width < 32 || height < 12;
-            let area = if mini {
-                Rect::new(0, 0, width, height)
-            } else {
-                Rect::new(0, 0, width, height).inner(Margin::new(2, 0))
-            };
+            let area = Rect::new(0, 0, width, height);
             let rect = monitor.header_switch_rect(area, mini);
             assert!(rect.right() <= area.right());
             let label = (rect.x..rect.right())
                 .map(|x| terminal.backend().buffer()[(x, 0)].symbol())
                 .collect::<String>();
-            assert_eq!(label, "[Git(g)]");
+            assert_eq!(label, git_label);
         }
     }
+    #[test]
+    fn workspace_buttons_keep_their_positions_and_mouse_targets_across_pages() {
+        let pages = [
+            config::PulseStartPage::Sessions,
+            config::PulseStartPage::Git,
+            config::PulseStartPage::File,
+        ];
+        for (width, height) in [(20, 10), (24, 10), (32, 12), (48, 24), (100, 40)] {
+            let screen = Rect::new(0, 0, width, height);
+            let (area, _) = pulse_header_area(screen);
+            let rects = workspace_header_rects(area);
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            let mut monitor = Monitor {
+                token_page: config::PulseStartPage::Sessions,
+                ..Default::default()
+            };
+            let mut labels = None;
+            for (active, page) in pages.into_iter().enumerate() {
+                monitor.page = page;
+                terminal.draw(|f| monitor.draw(f)).unwrap();
+                let buffer = terminal.backend().buffer();
+                let current_labels: Vec<String> = rects
+                    .into_iter()
+                    .take(3)
+                    .map(|rect| {
+                        (rect.x..rect.right())
+                            .map(|x| buffer[(x, rect.y)].symbol())
+                            .collect()
+                    })
+                    .collect();
+                if let Some(previous) = &labels {
+                    assert_eq!(&current_labels, previous);
+                } else {
+                    labels = Some(current_labels);
+                }
+                for (index, rect) in rects.into_iter().take(3).enumerate() {
+                    let text = (rect.x..rect.right())
+                        .map(|x| buffer[(x, rect.y)].symbol())
+                        .collect::<String>();
+                    assert!(text.contains(["T", "G", "F"][index]), "{width}: {text}");
+                    assert!(
+                        (rect.x..rect.right())
+                            .any(|x| buffer[(x, rect.y)].modifier.contains(Modifier::BOLD))
+                            == (index == active)
+                    );
+                }
+                for (index, rect) in rects.into_iter().take(3).enumerate() {
+                    for x in [rect.x, rect.right() - 1] {
+                        let click = Event::Mouse(MouseEvent {
+                            kind: MouseEventKind::Down(MouseButton::Left),
+                            column: x,
+                            row: rect.y,
+                            modifiers: KeyModifiers::NONE,
+                        });
+                        assert!(monitor.workspace_mouse(&click, screen));
+                        assert_eq!(monitor.page, pages[index]);
+                        assert_eq!(monitor.token_page, config::PulseStartPage::Sessions);
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn workspace_selection_is_idempotent_and_restores_token_context() {
         let mut monitor = Monitor {

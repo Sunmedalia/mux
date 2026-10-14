@@ -12,6 +12,7 @@ pub(super) struct Monitor {
     pub(super) page: config::PulseStartPage,
     pub(super) token_page: config::PulseStartPage,
     pub(super) git: git::GitPane,
+    pub(super) files: files::FilePane,
     pub(super) visual_mode: bool,
     pub(super) preferences: config::UiPreferences,
     pub(super) sessions_sort_tokens: bool,
@@ -76,6 +77,7 @@ impl Monitor {
             _ => None,
         };
         match code {
+            Some(KeyCode::Char('H')) => self.return_home(),
             Some(KeyCode::Char('l')) => {
                 self.help_language.toggle();
                 self.scroll = 0;
@@ -103,6 +105,17 @@ impl Monitor {
     }
 
     pub(super) fn return_home(&mut self) {
+        match self.page {
+            config::PulseStartPage::File => {
+                self.files.return_home();
+                return;
+            }
+            config::PulseStartPage::Git => {
+                self.git.return_home();
+                return;
+            }
+            _ => {}
+        }
         self.page = config::PulseStartPage::Home;
         self.token_page = self.page;
         self.help = false;
@@ -113,7 +126,11 @@ impl Monitor {
         }
     }
     pub(super) fn footer_key(&self, input: &Event, screen: Rect) -> Option<Option<KeyEvent>> {
-        if self.page == config::PulseStartPage::Git || self.help {
+        if matches!(
+            self.page,
+            config::PulseStartPage::Git | config::PulseStartPage::File
+        ) || self.help
+        {
             return None;
         }
         let Event::Mouse(mouse) = input else {
@@ -122,11 +139,7 @@ impl Monitor {
         if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
             return None;
         }
-        let area = if screen.width < 32 || screen.height < 12 {
-            screen
-        } else {
-            screen.inner(Margin::new(2, 0))
-        };
+        let area = screen;
         self.token_footer(area)
             .iter()
             .find(|button| contains(button.rect, mouse.column, mouse.row))
@@ -147,38 +160,134 @@ impl Monitor {
 
     pub(super) fn apply_start_page(&mut self) {
         self.page = self.preferences.pulse_start_page;
-        if self.page != config::PulseStartPage::Git {
+        if !matches!(
+            self.page,
+            config::PulseStartPage::Git | config::PulseStartPage::File
+        ) {
             self.token_page = self.page;
         }
     }
 
     pub(super) fn select_workspace(&mut self, git: bool) {
-        if git == (self.page == config::PulseStartPage::Git) {
+        if !git
+            && !matches!(
+                self.page,
+                config::PulseStartPage::Git | config::PulseStartPage::File
+            )
+        {
             return;
         }
-        if git {
-            self.token_page = self.page;
-            self.page = config::PulseStartPage::Git;
+        self.select_page(if git {
+            config::PulseStartPage::Git
         } else {
-            self.page = self.token_page;
+            self.token_page
+        });
+    }
+
+    pub(super) fn can_switch_workspace(&self) -> bool {
+        self.picker.is_none()
+            && (self.page != config::PulseStartPage::Git || self.git.can_switch_workspace())
+            && (self.page != config::PulseStartPage::File || self.files.can_switch_workspace())
+    }
+
+    fn select_page(&mut self, page: config::PulseStartPage) {
+        if self.page == page {
+            return;
         }
+        if !matches!(
+            self.page,
+            config::PulseStartPage::Git | config::PulseStartPage::File
+        ) {
+            self.token_page = self.page;
+        }
+        self.page = page;
     }
 
     pub(super) fn workspace_shortcut(&mut self, key: KeyEvent) -> bool {
-        if key.kind != event::KeyEventKind::Press
-            || self.picker.is_some()
-            || (self.page == config::PulseStartPage::Git && !self.git.can_switch_workspace())
-        {
+        if key.kind != event::KeyEventKind::Press || !self.can_switch_workspace() {
             return false;
         }
-        let git = match (key.code, key.modifiers) {
-            (KeyCode::Char('g'), KeyModifiers::NONE) => self.page != config::PulseStartPage::Git,
-            (KeyCode::Char('1'), KeyModifiers::ALT) => false,
-            (KeyCode::Char('2'), KeyModifiers::ALT) => true,
+        let page = match (key.code, key.modifiers) {
+            (KeyCode::Char('g'), KeyModifiers::NONE) => {
+                if self.page == config::PulseStartPage::Git {
+                    self.token_page
+                } else {
+                    config::PulseStartPage::Git
+                }
+            }
+            (KeyCode::Char('f'), KeyModifiers::NONE) => {
+                if self.page == config::PulseStartPage::File {
+                    self.token_page
+                } else {
+                    config::PulseStartPage::File
+                }
+            }
+            (KeyCode::Char('1'), KeyModifiers::ALT) => {
+                if matches!(
+                    self.page,
+                    config::PulseStartPage::Git | config::PulseStartPage::File
+                ) {
+                    self.token_page
+                } else {
+                    self.page
+                }
+            }
+            (KeyCode::Char('2'), KeyModifiers::ALT) => config::PulseStartPage::Git,
+            (KeyCode::Char('3'), KeyModifiers::ALT) => config::PulseStartPage::File,
             _ => return false,
         };
-        self.select_workspace(git);
+        self.select_page(page);
         true
+    }
+
+    pub(super) fn workspace_mouse(&mut self, input: &Event, screen: Rect) -> bool {
+        let Event::Mouse(mouse) = input else {
+            return false;
+        };
+        if mouse.kind != MouseEventKind::Down(MouseButton::Left) {
+            return false;
+        }
+        let area = if self.help
+            && !matches!(
+                self.page,
+                config::PulseStartPage::Git | config::PulseStartPage::File
+            ) {
+            help_area(screen).0
+        } else {
+            pulse_header_area(screen).0
+        };
+        if self.page == config::PulseStartPage::File {
+            let [_, _, _, _, help] = file_page_header_rects(area);
+            if self.files.help_available() && contains(help, mouse.column, mouse.row) {
+                self.files.input(&Event::Key(KeyEvent::new(
+                    KeyCode::Char('?'),
+                    KeyModifiers::NONE,
+                )));
+                return true;
+            }
+        }
+        if !self.can_switch_workspace() {
+            return false;
+        }
+        for (index, rect) in workspace_header_rects(area).into_iter().take(3).enumerate() {
+            if contains(rect, mouse.column, mouse.row) {
+                let target = match index {
+                    0 if matches!(
+                        self.page,
+                        config::PulseStartPage::Git | config::PulseStartPage::File
+                    ) =>
+                    {
+                        self.token_page
+                    }
+                    0 => self.page,
+                    1 => config::PulseStartPage::Git,
+                    _ => config::PulseStartPage::File,
+                };
+                self.select_page(target);
+                return true;
+            }
+        }
+        false
     }
 
     pub(super) fn refresh_preferences(&mut self, preferences: config::UiPreferences) -> bool {

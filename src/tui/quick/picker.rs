@@ -425,7 +425,7 @@ mod tests {
                 let buffer = terminal.backend().buffer();
                 let first: String = (0..width).map(|x| buffer[(x, 0)].symbol()).collect();
                 assert!(
-                    first.contains("TOKEN") && first.contains("[Git(g)]"),
+                    first.contains("TOKEN") && first.contains("[GIT]"),
                     "Background header stays visible: {first}"
                 );
             }

@@ -1,5 +1,18 @@
 use super::*;
 
+pub(super) fn popup_block(rect: Rect, title: &'static str, danger: bool) -> Block<'static> {
+    Block::default()
+        .borders(if rect.width >= 4 && rect.height >= 3 {
+            Borders::ALL
+        } else {
+            Borders::NONE
+        })
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .title(title)
+        .border_style(Style::default().fg(if danger { RED } else { BLUE }))
+        .style(Style::default().bg(BG).fg(INK))
+}
+
 pub(super) fn short(n: i64) -> String {
     if n >= 1_000_000_000 {
         format!("{:.1}B", n as f64 / 1e9)
@@ -571,6 +584,25 @@ pub(super) fn footer_control(
         enabled,
     }
 }
+pub(super) fn footer_style(key: KeyCode, enabled: bool) -> Style {
+    Style::default()
+        .fg(if !enabled {
+            SOFT
+        } else if matches!(key, KeyCode::Char('d' | 'y')) {
+            RED
+        } else if key == KeyCode::Enter {
+            BG
+        } else {
+            BLUE
+        })
+        .bg(if enabled && key == KeyCode::Enter {
+            BLUE
+        } else if enabled {
+            RAIL
+        } else {
+            BG
+        })
+}
 impl FooterControl {
     pub(super) fn modified(mut self, modifiers: KeyModifiers) -> Self {
         self.key.modifiers = modifiers;
@@ -634,7 +666,7 @@ pub(super) fn footer_buttons(
     page: config::PulseStartPage,
     sort_tokens: bool,
 ) -> Vec<FooterButton> {
-    let back = || footer_control(["Home(q)", "Home", "q"], KeyCode::Char('q'), true);
+    let back = || footer_control(["Home(H)", "Home", "H"], KeyCode::Char('H'), true);
     let refresh = || footer_control(["Refresh(r)", "Refresh", "r"], KeyCode::Char('r'), true);
     let controls = match page {
         config::PulseStartPage::Sessions => vec![
@@ -663,42 +695,69 @@ pub(super) fn footer_buttons(
     };
     layout_footer(area, controls)
 }
-fn page_header_labels(available: u16, git: bool) -> (&'static str, &'static str, u16, u16) {
-    let title = if git { "▎ GIT" } else { "▎ TOKEN" };
-    let plain = if git { "GIT" } else { "TOKEN" };
-    let short = if git { "GIT" } else { "TOK" };
-    let initial = if git { "G" } else { "T" };
-    let button = if git { "[Token(g)]" } else { "[Git(g)]" };
-    let compact_button = if git { "[Token]" } else { "[Git]" };
-    let tiny_button = if git { "[T]" } else { "[G]" };
-    match available {
-        19.. => (title, button, 7, 2),
-        16.. => (title, button, title.width() as u16, 1),
-        14.. => (plain, button, plain.width() as u16, 1),
-        11.. => (plain, compact_button, plain.width() as u16, 1),
-        7.. => (short, tiny_button, 3, 1),
-        5.. => (initial, tiny_button, 1, 1),
-        4 => (initial, tiny_button, 1, 0),
-        2.. => (initial, if git { "T" } else { "G" }, 1, 0),
-        _ => (initial, "", available, 0),
+/// Token, Git and File always occupy the same slots, regardless of the active page.
+pub(super) fn workspace_header_rects(area: Rect) -> [Rect; 5] {
+    let controls_width = if area.width >= 38 {
+        9
+    } else if area.width >= 9 {
+        4
+    } else {
+        area.width.min(1)
+    };
+    let help_width = if area.width >= 10 {
+        4
+    } else if area.width >= 3 {
+        1
+    } else {
+        0
+    };
+    let gap = u16::from(help_width > 0 && area.width > controls_width + help_width);
+    let height = u16::from(area.height > 0);
+    let help = Rect::new(
+        area.right().saturating_sub(help_width),
+        area.y,
+        help_width,
+        height,
+    );
+    let controls = Rect::new(
+        help.x.saturating_sub(gap + controls_width).max(area.x),
+        area.y,
+        controls_width,
+        height,
+    );
+    let available = controls.x.saturating_sub(area.x);
+    let widths = if available >= 20 {
+        [7, 5, 6]
+    } else if available >= 14 {
+        [5, 3, 4]
+    } else if available >= 11 {
+        [3, 3, 3]
+    } else {
+        [1, 1, 1]
+    };
+    let mut rects = [Rect::default(); 5];
+    let mut x = area.x;
+    for (index, width) in widths.into_iter().enumerate() {
+        let width = width.min(controls.x.saturating_sub(x));
+        rects[index] = Rect::new(x, area.y, width, height);
+        x = x.saturating_add(width + 1).min(controls.x);
     }
+    rects[3] = controls;
+    rects[4] = help;
+    rects
 }
 
-pub(super) fn page_header_rects(area: Rect, reserve: u16, git: bool) -> [Rect; 2] {
-    let available = area.width.saturating_sub(reserve);
-    let (_, button, title_width, gap) = page_header_labels(available, git);
-    [
-        Rect::new(area.x, area.y, title_width, 1),
-        Rect::new(area.x + title_width + gap, area.y, button.width() as u16, 1),
-    ]
+pub(super) fn page_header_rects(area: Rect, _reserve: u16, git: bool) -> [Rect; 2] {
+    let rects = workspace_header_rects(area);
+    if git {
+        [rects[1], rects[0]]
+    } else {
+        [rects[0], rects[1]]
+    }
 }
 pub(super) fn pulse_header_area(screen: Rect) -> (Rect, u16) {
     let mini = screen.width < 32 || screen.height < 12;
-    let area = if mini {
-        screen
-    } else {
-        screen.inner(Margin::new(2, 0))
-    };
+    let area = screen;
     (area, pulse_header_reserve(area, mini))
 }
 pub(super) fn pulse_header_reserve(area: Rect, mini: bool) -> u16 {
@@ -712,46 +771,88 @@ pub(super) fn pulse_help_rect(area: Rect) -> Rect {
         u16::from(area.height > 0),
     )
 }
+fn workspace_header_label(index: usize, width: u16) -> &'static str {
+    let full = ["TOKEN", "GIT", "FILE"][index];
+    if usize::from(width) >= full.width() + 2 {
+        ["[TOKEN]", "[GIT]", "[FILE]"][index]
+    } else if usize::from(width) >= full.width() {
+        full
+    } else if width >= 3 {
+        ["[T]", "[G]", "[F]"][index]
+    } else {
+        ["T", "G", "F"][index]
+    }
+}
+
+fn draw_workspace_header(frame: &mut ratatui::Frame, area: Rect, active: usize, switchable: bool) {
+    for (index, rect) in workspace_header_rects(area).into_iter().take(3).enumerate() {
+        let label = workspace_header_label(index, rect.width);
+        let style = Style::default()
+            .bg(BG)
+            .fg(if index == active { INK } else { SOFT });
+        let style = if index == active {
+            style.add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+        } else if !switchable {
+            style.add_modifier(Modifier::DIM)
+        } else {
+            style
+        };
+        let text = Line::styled(label, style);
+        frame.render_widget(Paragraph::new(text).style(style), rect);
+    }
+}
+
 pub(super) fn draw_page_header(
     frame: &mut ratatui::Frame,
     area: Rect,
-    reserve: u16,
+    _reserve: u16,
     git: bool,
     switchable: bool,
 ) {
-    let [title_rect, button_rect] = page_header_rects(area, reserve, git);
-    let (title, button, _, _) = page_header_labels(area.width.saturating_sub(reserve), git);
-    let title = if let Some(label) = title.strip_prefix("▎ ") {
-        Line::from(vec![
-            Span::styled("▎ ", Style::default().fg(BLUE)),
-            Span::styled(label, Style::default().fg(INK).add_modifier(Modifier::BOLD)),
-        ])
-    } else {
-        Line::from(Span::styled(
-            title,
-            Style::default().fg(INK).add_modifier(Modifier::BOLD),
-        ))
-    };
+    draw_workspace_header(frame, area, usize::from(git), switchable);
+}
+
+pub(super) fn file_header_rect(area: Rect, _reserve: u16, _git: bool) -> Rect {
+    workspace_header_rects(area)[2]
+}
+
+/// File, Token, Git, reserved header controls, help.
+pub(super) fn file_page_header_rects(area: Rect) -> [Rect; 5] {
+    let [token, git, file, controls, help] = workspace_header_rects(area);
+    [file, token, git, controls, help]
+}
+
+pub(super) fn draw_file_page_header(
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    switchable: bool,
+    help_available: bool,
+) {
+    let header = Rect::new(area.x, area.y, area.width, u16::from(area.height > 0));
+    frame.render_widget(Clear, header);
+    frame.render_widget(Block::default().style(Style::default().bg(BG)), header);
+    draw_workspace_header(frame, area, 2, switchable);
+    let rects = workspace_header_rects(area);
     frame.render_widget(
-        Paragraph::new(title).style(Style::default().bg(BG)),
-        title_rect,
-    );
-    frame.render_widget(
-        Paragraph::new(button).style(Style::default().fg(SOFT).bg(BG).add_modifier(
-            if switchable {
-                Modifier::empty()
-            } else {
-                Modifier::DIM
-            },
-        )),
-        button_rect,
+        Paragraph::new(if rects[4].width >= 4 { "?(?)" } else { "?" }).style(
+            Style::default()
+                .bg(BG)
+                .fg(SOFT)
+                .add_modifier(if help_available {
+                    Modifier::empty()
+                } else {
+                    Modifier::DIM
+                }),
+        ),
+        rects[4],
     );
 }
+
 pub(super) fn content_body(inner: Rect) -> Rect {
     Rect::new(
         inner.x,
         inner.y + 2,
-        inner.width.saturating_sub(2),
+        inner.width.saturating_sub(1),
         inner.height.saturating_sub(4),
     )
 }
@@ -863,4 +964,65 @@ pub(super) fn hourly_chart(hours: &[i64; 24], width: u16, color: Color) -> Vec<L
         SOFT,
     ));
     lines
+}
+
+pub(super) fn draw_search_field(
+    frame: &mut ratatui::Frame,
+    rect: Rect,
+    query: &str,
+    focused: bool,
+    enabled: bool,
+    placeholder: &str,
+) -> Rect {
+    let border = Block::default()
+        .borders(if rect.height >= 3 {
+            Borders::ALL
+        } else {
+            Borders::LEFT | Borders::RIGHT
+        })
+        .border_style(Style::default().fg(SOFT))
+        .style(Style::default().bg(BG));
+    let inner = border.inner(rect);
+    frame.render_widget(border, rect);
+    let rect = inner;
+    let clear_width = if !query.is_empty() && rect.width >= 6 {
+        3
+    } else {
+        0
+    };
+    let width = rect.width.saturating_sub(clear_width);
+    let available = width;
+    let value = super::git::safe_text(query);
+    let mut suffix = value.as_str();
+    let cursor = if focused { "▏" } else { "" };
+    while suffix.width() + cursor.width() > usize::from(available) && !suffix.is_empty() {
+        suffix = &suffix[suffix.chars().next().unwrap().len_utf8()..];
+    }
+    let text = if query.is_empty() && !focused {
+        placeholder.into()
+    } else {
+        format!("{suffix}{cursor}")
+    };
+    let style = Style::default()
+        .fg(if query.is_empty() || !enabled {
+            SOFT
+        } else {
+            INK
+        })
+        .bg(BG)
+        .add_modifier(if enabled {
+            Modifier::empty()
+        } else {
+            Modifier::DIM
+        });
+    frame.render_widget(
+        Paragraph::new(text).style(style),
+        Rect::new(rect.x, rect.y, width, rect.height),
+    );
+    if clear_width > 0 {
+        let clear = Rect::new(rect.right() - clear_width, rect.y, clear_width, rect.height);
+        frame.render_widget(Paragraph::new("[x]").style(style.fg(BLUE)), clear);
+        return clear;
+    }
+    Rect::default()
 }

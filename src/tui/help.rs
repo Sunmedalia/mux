@@ -367,7 +367,7 @@ pub(super) fn help_commands(section: HelpSection) -> &'static [(&'static str, &'
             ("Ctrl+S / Ctrl+R", "Save changes / discard unsaved changes"),
             (
                 "Pulse",
-                "Configure monitor view, details, start page and sorting",
+                "Configure monitor view, details, start page, sorting and File icons",
             ),
             ("New models", "Set Claude 1M and per-client enable defaults"),
             (
@@ -455,8 +455,13 @@ pub(super) fn help_commands(section: HelpSection) -> &'static [(&'static str, &'
             ("Tab / 1–4", "Cycle / select agent"),
             ("e", "Open editor in a new tab"),
             (
-                "Alt+1 / Alt+2 · T / g",
-                "Select Token / Git; retain each page's context",
+                "H / Home",
+                "Return to the current feature home: Token / Git / File",
+            ),
+            ("File Backspace", "Go to parent directory"),
+            (
+                "Alt+1 / Alt+2 / Alt+3 · g / f",
+                "Select Token / Git / File; retain each page's context",
             ),
             (
                 "Git L",

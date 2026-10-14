@@ -16,6 +16,36 @@ enum MenuKind {
     Fetch,
     Push,
 }
+const ACTION_LABELS: [&str; 28] = [
+    "Stage file",
+    "Unstage file",
+    "Discard file",
+    "Stage all",
+    "Unstage all",
+    "Commit",
+    "Branches",
+    "Create branch",
+    "Fetch",
+    "Pull (fast-forward)",
+    "Push",
+    "Log",
+    "Stage selected block",
+    "Unstage selected block",
+    "Discard selected block",
+    "Refresh",
+    "Repository details",
+    "Last operation result",
+    "Toggle Diff wrapping",
+    "Previous file",
+    "Next file",
+    "Previous block",
+    "Next block",
+    "Return to files",
+    "Commit details",
+    "Newer commits",
+    "Older commits",
+    "Search commits",
+];
 enum FormKind {
     Commit {
         head: Option<String>,
@@ -23,7 +53,6 @@ enum FormKind {
     },
     Create,
     Track(String),
-    Search,
 }
 enum Modal {
     Menu {
@@ -41,6 +70,7 @@ enum Modal {
         description: Box<str>,
     },
     Message(String),
+    CommitDetails(String),
     Help(HelpPage),
     OperationResult {
         recover_commit: bool,
@@ -108,6 +138,7 @@ pub(super) struct GitPane {
     diff: Option<Diff>,
     history: Option<service::History>,
     history_selected: usize,
+    last_commit_click: Option<(String, Instant)>,
     selected: usize,
     hunk: usize,
     scroll: u16,
@@ -139,21 +170,32 @@ pub(super) struct GitPane {
     return_scroll: Option<u16>,
     filter: String,
     search_before: Option<String>,
+    search_position: Option<(usize, u16)>,
+    search_rect: Rect,
+    search_clear_rect: Rect,
+    popup_area: Rect,
+    view_width: u16,
+    action_return: Option<(usize, String)>,
+    action_ids: Vec<usize>,
+    action_view: Option<(Rect, u16)>,
     collapsed: Vec<Group>,
     group_rows: Vec<(u16, Group)>,
     repository_button: Option<Rect>,
+    repository_anchor: Option<Rect>,
     pin_button: Option<Rect>,
     body: Rect,
     screen: Rect,
     branch_button: Option<Rect>,
+    branch_anchor: Option<Rect>,
     rows: Vec<(u16, usize)>,
     menu_rows: Vec<(u16, usize)>,
+    menu_scroll_manual: bool,
     limit: u16,
 }
 
 // Unlike agent usage tracking, Git follows regular shell panes too. Only panes
 // in the originating tab are candidates; focusing Pulse retains the last cwd.
-fn project_cwd(
+pub(super) fn project_cwd(
     panes: &serde_json::Value,
     tab: &str,
     source: &str,
@@ -223,14 +265,82 @@ fn watch_focus(dirty: Arc<AtomicBool>, stopped: Arc<AtomicBool>) {
     }
 }
 impl GitPane {
+    fn actions_menu(&self) -> bool {
+        matches!(
+            self.modal,
+            Some(Modal::Menu {
+                kind: MenuKind::Operations,
+                ..
+            })
+        )
+    }
+    fn footer_height(&self) -> u16 {
+        if self.screen.height < 7 || self.actions_menu() {
+            1
+        } else if self.modal.is_none() && self.diff.is_none() && self.history.is_none() {
+            2
+        } else if self.modal.is_none() || matches!(self.modal, Some(Modal::CommitDetails(_))) {
+            1 + u16::from(self.view_status_visible())
+        } else {
+            3
+        }
+    }
+    fn view_status_visible(&self) -> bool {
+        self.busy
+            || self.preview_refreshing.load(Ordering::Relaxed)
+            || self.error.is_some()
+            || self.last_failure().is_some()
+            || self.search_before.is_some()
+            || !self.notice.is_empty()
+    }
+    fn footer_row(&self, navigation: bool) -> Option<u16> {
+        if navigation && self.footer_height() < 3 {
+            return None;
+        }
+        if navigation && self.modal.is_none() && (self.diff.is_some() || self.history.is_some()) {
+            return None;
+        }
+        Some(
+            self.screen
+                .bottom()
+                .saturating_sub(if navigation { 2 } else { 1 }),
+        )
+    }
     fn help_available(&self) -> bool {
         !self.busy
             && self.search_before.is_none()
             && (self.modal.is_none() || matches!(self.modal, Some(Modal::Help(_))))
     }
 
+    pub(super) fn return_home(&mut self) {
+        if self.busy {
+            return;
+        }
+        self.diff = None;
+        self.history = None;
+        self.modal = None;
+        self.search_before = None;
+        self.search_position = None;
+        self.action_return = None;
+        self.action_view = None;
+        self.filter.clear();
+        self.collapsed.clear();
+        self.selected = 0;
+        self.history_selected = 0;
+        self.last_commit_click = None;
+        self.branch_anchor = None;
+        self.hunk = 0;
+        self.scroll = 0;
+        self.horizontal = 0;
+        self.return_scroll = None;
+        self.sync_watch();
+        self.pin();
+    }
+
     pub(super) fn can_switch_workspace(&self) -> bool {
-        !self.busy && self.modal.is_none() && self.search_before.is_none()
+        !self.busy
+            && (self.modal.is_none() || matches!(self.modal, Some(Modal::CommitDetails(_))))
+            && self.search_before.is_none()
     }
     pub(super) fn start(&mut self) {
         let (send, requests) = mpsc::sync_channel(8);
@@ -518,6 +628,7 @@ impl GitPane {
                 }
                 Response::Menu(kind, result) => {
                     self.busy = false;
+                    self.menu_scroll_manual = false;
                     match result {
                         Ok(items) if items.is_empty() => {
                             self.report_error("No branches/remotes available".into())
@@ -637,6 +748,7 @@ impl GitPane {
                             self.history = Some(history);
                             self.diff = None;
                             self.history_selected = 0;
+                            self.last_commit_click = None;
                             self.scroll = 0;
                             self.return_scroll = None;
                             self.notice.clear();
@@ -649,7 +761,7 @@ impl GitPane {
                     self.scroll = 0;
                     self.notice.clear();
                     match result {
-                        Ok(message) => self.modal = Some(Modal::Message(message)),
+                        Ok(message) => self.modal = Some(Modal::CommitDetails(message)),
                         Err(error) => self.report_error(error),
                     }
                 }
@@ -886,6 +998,7 @@ impl GitPane {
         }
     }
     fn repository_details(&mut self) {
+        self.repository_anchor = None;
         self.remember_scroll();
         if let Some(snapshot) = &self.snapshot {
             let fetched = snapshot.fetched.map_or("unknown".into(), fetch_age);
@@ -907,10 +1020,7 @@ impl GitPane {
         }
     }
     fn remember_scroll(&mut self) {
-        if self.return_scroll.is_none()
-            && self.modal.is_none()
-            && (self.diff.is_some() || self.history.is_some())
-        {
+        if self.return_scroll.is_none() && self.modal.is_none() {
             self.return_scroll = Some(self.scroll);
         }
     }
@@ -1023,6 +1133,8 @@ impl GitPane {
         if let Err(Request::Execute(_, action)) = self.request(Request::Execute(root, action)) {
             return Err(action);
         }
+        self.action_return = None;
+        self.restore_action_view();
         if let Some(draft) = draft {
             self.pending_commit = Some(draft);
         }
@@ -1100,37 +1212,150 @@ impl GitPane {
         self.confirm(action, description);
     }
     fn operations(&mut self) {
+        self.menu_scroll_manual = false;
         if self.snapshot.is_none() {
             return;
         }
         self.remember_scroll();
+        self.action_view.get_or_insert((self.body, self.limit));
         self.scroll = 0;
+        self.action_ids = if self.history.is_some() {
+            vec![24, 25, 26, 27, 15, 23]
+        } else if self.diff.is_some() {
+            vec![0, 1, 2, 12, 13, 14, 18, 19, 20, 21, 22, 15, 17, 23]
+        } else {
+            vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 15, 16, 17]
+        };
         self.modal = Some(Modal::Menu {
             kind: MenuKind::Operations,
-            items: [
-                "Stage file",
-                "Unstage file",
-                "Discard file",
-                "Stage all",
-                "Unstage all",
-                "Commit",
-                "Branches",
-                "Create branch",
-                "Fetch",
-                "Pull (fast-forward)",
-                "Push",
-                "Git log",
-                "Stage selected block",
-            ]
-            .iter()
-            .map(|s| (*s).into())
-            .collect(),
+            items: self
+                .action_ids
+                .iter()
+                .map(|index| {
+                    if *index == 18 {
+                        format!("Wrap {}(w)", if self.nowrap { "OFF" } else { "ON" })
+                    } else {
+                        ACTION_LABELS[*index].into()
+                    }
+                })
+                .collect(),
             selected: 0,
             filter: String::new(),
         });
+        self.normalize_actions(false);
         self.pin();
     }
+    fn menu_action(&self, index: usize) -> usize {
+        self.action_ids.get(index).copied().unwrap_or(index)
+    }
+    fn leave_actions(&mut self) {
+        self.action_return = None;
+        self.restore_action_view();
+        if let Some(scroll) = self.return_scroll.take() {
+            self.scroll = scroll;
+        }
+    }
+    fn restore_action_view(&mut self) {
+        if let Some((body, limit)) = self.action_view.take() {
+            self.body = body;
+            self.limit = limit;
+        }
+    }
+    fn operation_enabled(&self, index: usize) -> bool {
+        let file = self.file();
+        let block = self
+            .diff
+            .as_ref()
+            .filter(|diff| diff.reason.is_none() && !diff.hunks.is_empty() && !self.diff_pending());
+        match index {
+            0 => file.as_ref().is_some_and(|file| file.group != Group::Index),
+            1 => file.as_ref().is_some_and(|file| file.group == Group::Index),
+            2 => {
+                file.as_ref()
+                    .is_some_and(|file| file.group == Group::Worktree)
+                    && !self.diff_pending()
+            }
+            3 => self.snapshot.as_ref().is_some_and(|snapshot| {
+                snapshot.files.iter().any(|file| file.group != Group::Index)
+            }),
+            4 => self.snapshot.as_ref().is_some_and(|snapshot| {
+                snapshot.files.iter().any(|file| file.group == Group::Index)
+            }),
+            5 => self.snapshot.as_ref().is_some_and(|snapshot| {
+                snapshot.files.iter().any(|file| file.group == Group::Index)
+                    && !snapshot
+                        .files
+                        .iter()
+                        .any(|file| file.group == Group::Conflict)
+            }),
+            12 | 14 => block.is_some_and(|diff| diff.file.group == Group::Worktree),
+            13 => block.is_some_and(|diff| diff.file.group == Group::Index),
+            18 => self.diff.is_some(),
+            19 => self.diff_position().is_some_and(|(index, _)| index > 0),
+            20 => self
+                .diff_position()
+                .is_some_and(|(index, count)| index + 1 < count),
+            21 => self.diff.as_ref().is_some_and(|diff| {
+                diff.reason.is_none() && self.hunk > 0 && self.hunk < diff.hunks.len()
+            }),
+            22 => self
+                .diff
+                .as_ref()
+                .is_some_and(|diff| diff.reason.is_none() && self.hunk + 1 < diff.hunks.len()),
+            23 => self.history.is_some() || self.diff.is_some(),
+            24 => self
+                .history
+                .as_ref()
+                .is_some_and(|history| !history.commits.is_empty()),
+            25 => self
+                .history
+                .as_ref()
+                .is_some_and(|history| history.page > 0),
+            26 => self
+                .history
+                .as_ref()
+                .is_some_and(|history| history.has_more),
+            27 => self.history.is_some(),
+            _ => self.snapshot.is_some(),
+        }
+    }
+    fn normalize_actions(&mut self, backward: bool) {
+        let Some(Modal::Menu {
+            kind: MenuKind::Operations,
+            items,
+            selected,
+            filter,
+        }) = &self.modal
+        else {
+            return;
+        };
+        let enabled: Vec<_> = items
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| item.to_lowercase().contains(&filter.to_lowercase()))
+            .map(|(index, _)| self.operation_enabled(self.menu_action(index)))
+            .collect();
+        let current = (*selected).min(enabled.len().saturating_sub(1));
+        let next = if enabled.get(current) == Some(&true) {
+            current
+        } else if backward {
+            (0..=current)
+                .rev()
+                .find(|index| enabled.get(*index) == Some(&true))
+                .or_else(|| enabled.iter().position(|value| *value))
+                .unwrap_or(current)
+        } else {
+            (current..enabled.len())
+                .find(|index| enabled[*index])
+                .or_else(|| enabled.iter().rposition(|value| *value))
+                .unwrap_or(current)
+        };
+        if let Some(Modal::Menu { selected, .. }) = &mut self.modal {
+            *selected = next;
+        }
+    }
     fn operation(&mut self, index: usize) {
+        self.remember_scroll();
         match index {
             0 => {
                 if let Some(file) = self.file() {
@@ -1143,7 +1368,9 @@ impl GitPane {
                 }
             }
             2 => {
-                if let (Some(root), Some(file)) = (self.root(), self.file()) {
+                if let Some(diff) = self.diff.clone() {
+                    self.confirm_discard(diff, false);
+                } else if let (Some(root), Some(file)) = (self.root(), self.file()) {
                     let _ = self.request(Request::Diff(root, file, true));
                 }
             }
@@ -1155,6 +1382,7 @@ impl GitPane {
             }
             5 => self.open_commit(),
             6 => {
+                self.branch_anchor = None;
                 if let Some(root) = self.root() {
                     let _ = self.request(Request::Menu(root, MenuKind::Branches));
                 }
@@ -1187,7 +1415,10 @@ impl GitPane {
                     let _ = self.request(Request::Menu(root, MenuKind::Push));
                 }
             }
-            11 => self.open_history(0),
+            11 => {
+                self.leave_actions();
+                self.open_history(0);
+            }
             12 => {
                 if let Some(diff) = self.diff.clone()
                     && diff.file.group == Group::Worktree
@@ -1203,6 +1434,35 @@ impl GitPane {
                     self.error = Some("Open an unstaged text Diff and select a block".into());
                 }
             }
+            13 => {
+                self.key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::NONE));
+            }
+            14 => {
+                self.key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+            }
+            15 => {
+                self.leave_actions();
+                self.key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE));
+            }
+            16 => self.repository_details(),
+            17 => self.open_operation_result(),
+            18 => {
+                self.leave_actions();
+                self.key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE));
+            }
+            19..=27 => {
+                self.leave_actions();
+                let code = match index {
+                    19 | 25 => KeyCode::Char(','),
+                    20 | 26 => KeyCode::Char('.'),
+                    21 => KeyCode::Char('['),
+                    22 => KeyCode::Char(']'),
+                    23 => KeyCode::Esc,
+                    24 => KeyCode::Enter,
+                    _ => KeyCode::Char('/'),
+                };
+                self.key(KeyEvent::new(code, KeyModifiers::NONE));
+            }
             _ => {}
         }
         self.pin();
@@ -1211,7 +1471,7 @@ impl GitPane {
         self.modal = None;
         self.scroll = 0;
         match kind {
-            MenuKind::Operations => self.operation(index),
+            MenuKind::Operations => self.operation(self.menu_action(index)),
             MenuKind::Fetch => {
                 let _ = self.execute(Action::Fetch(item));
             }
@@ -1259,19 +1519,61 @@ impl GitPane {
                 .history
                 .as_ref()
                 .map_or(String::new(), |h| h.query.clone());
-            let _ = self.request(Request::History(root, page, query));
+            if self.request(Request::History(root, page, query)).is_ok() {
+                self.action_return = None;
+            }
         }
     }
     fn search_history(&mut self) {
-        self.remember_scroll();
-        self.modal = Some(Modal::Form {
-            kind: FormKind::Search,
-            text: self
-                .history
-                .as_ref()
-                .map_or(String::new(), |h| h.query.clone()),
-        });
-        self.scroll = 0;
+        self.begin_search();
+    }
+    fn search_query(&self) -> &str {
+        self.history
+            .as_ref()
+            .map_or(self.filter.as_str(), |history| history.query.as_str())
+    }
+    fn search_query_mut(&mut self) -> &mut String {
+        self.history
+            .as_mut()
+            .map_or(&mut self.filter, |history| &mut history.query)
+    }
+    fn begin_search(&mut self) {
+        if self.busy || self.modal.is_some() || self.diff.is_some() || self.search_before.is_some()
+        {
+            return;
+        }
+        self.search_before = Some(self.search_query().into());
+        self.search_position = Some((
+            if self.history.is_some() {
+                self.history_selected
+            } else {
+                self.selected
+            },
+            self.scroll,
+        ));
+        self.pin();
+    }
+    fn finish_search(&mut self, cancel: bool) {
+        let Some(previous) = self.search_before.take() else {
+            return;
+        };
+        if cancel {
+            *self.search_query_mut() = previous;
+            if let Some((index, scroll)) = self.search_position.take() {
+                if self.history.is_some() {
+                    self.history_selected = index;
+                } else {
+                    self.selected = index;
+                }
+                self.scroll = scroll;
+            }
+            self.ensure_selection();
+        } else {
+            self.search_position = None;
+            if self.history.is_some() && self.search_query() != previous {
+                self.open_history(0);
+            }
+        }
         self.pin();
     }
     fn history_key(&mut self, key: KeyEvent) -> bool {
@@ -1292,8 +1594,9 @@ impl GitPane {
             KeyCode::Enter => {
                 if let (Some(root), Some(commit)) =
                     (self.root(), history.commits.get(self.history_selected))
+                    && self.request(Request::Show(root, commit.id.clone())).is_ok()
                 {
-                    let _ = self.request(Request::Show(root, commit.id.clone()));
+                    self.remember_scroll();
                 }
             }
             KeyCode::Up | KeyCode::Char('k') => {
@@ -1328,6 +1631,7 @@ impl GitPane {
         true
     }
     fn scroll_to(&mut self, target: u16) {
+        self.menu_scroll_manual = matches!(self.modal, Some(Modal::Menu { .. }));
         self.scroll = target.min(self.limit);
         let visible_end = self.scroll.saturating_add(self.body.height.max(1));
         if !self.busy && self.modal.is_none() && self.diff.is_none() {
@@ -1363,10 +1667,16 @@ impl GitPane {
         }
     }
     fn key(&mut self, mut key: KeyEvent) -> bool {
+        self.last_commit_click = None;
+        self.menu_scroll_manual = false;
         let typing = self.search_before.is_some()
             || matches!(
                 self.modal,
-                Some(Modal::Form { .. }) | Some(Modal::Menu { .. })
+                Some(Modal::Form { .. })
+                    | Some(Modal::Menu {
+                        kind: MenuKind::Branches | MenuKind::Fetch | MenuKind::Push,
+                        ..
+                    })
             );
         if key.code == KeyCode::Char('q') && !typing && key.modifiers == KeyModifiers::NONE {
             key.code = KeyCode::Esc;
@@ -1376,8 +1686,26 @@ impl GitPane {
             self.reading_key(key.code);
             return true;
         }
+        if key.code == KeyCode::Char('H')
+            && !typing
+            && !matches!(self.modal, Some(Modal::Confirm { .. }))
+        {
+            self.return_home();
+            return true;
+        }
         if let Some(modal) = self.modal.take() {
-            if !matches!(modal, Modal::Menu { .. }) {
+            if key.code == KeyCode::Esc
+                && matches!(
+                    modal,
+                    Modal::Menu {
+                        kind: MenuKind::Operations,
+                        ..
+                    }
+                )
+            {
+                self.action_return = None;
+            }
+            if !matches!(modal, Modal::Menu { .. } | Modal::CommitDetails(_)) {
                 match key.code {
                     KeyCode::PageDown => {
                         self.scroll = self
@@ -1396,9 +1724,21 @@ impl GitPane {
                 }
             }
             match modal {
+                Modal::CommitDetails(message) => {
+                    if matches!(key.code, KeyCode::Esc | KeyCode::Enter | KeyCode::Left) {
+                        if let Some(scroll) = self.return_scroll.take() {
+                            self.scroll = scroll;
+                        }
+                    } else {
+                        self.reading_key(key.code);
+                        self.modal = Some(Modal::CommitDetails(message));
+                    }
+                }
                 Modal::OperationResult { recover_commit } => match key.code {
                     KeyCode::Esc | KeyCode::Enter => {
-                        if let Some(scroll) = self.return_scroll.take() {
+                        if self.action_return.is_none()
+                            && let Some(scroll) = self.return_scroll.take()
+                        {
                             self.scroll = scroll;
                         }
                         if recover_commit {
@@ -1446,7 +1786,9 @@ impl GitPane {
                 },
                 Modal::Message(message) => match key.code {
                     KeyCode::Esc | KeyCode::Enter => {
-                        if let Some(scroll) = self.return_scroll.take() {
+                        if self.action_return.is_none()
+                            && let Some(scroll) = self.return_scroll.take()
+                        {
                             self.scroll = scroll;
                         }
                     }
@@ -1506,10 +1848,6 @@ impl GitPane {
                         {
                             self.pending_commit = None;
                         }
-                    } else if submit && matches!(kind, FormKind::Search) {
-                        if let Some(root) = self.root() {
-                            let _ = self.request(Request::History(root, 0, text.trim().into()));
-                        }
                     } else if submit {
                         if text.lines().next().unwrap_or("").trim().is_empty() {
                             self.error = Some("A title/name is required".into());
@@ -1537,16 +1875,12 @@ impl GitPane {
                                         .unwrap_or(&remote)
                                         .into(),
                                 },
-                                FormKind::Search => unreachable!(),
                             };
                             self.confirm(action, description);
                         }
                     } else {
                         match key.code {
-                            KeyCode::Char('u')
-                                if matches!(kind, FormKind::Search)
-                                    && key.modifiers.contains(KeyModifiers::CONTROL) =>
-                            {
+                            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                                 text.clear()
                             }
                             KeyCode::Backspace => {
@@ -1582,7 +1916,13 @@ impl GitPane {
                     match key.code {
                         KeyCode::Esc => {}
                         KeyCode::Enter => {
-                            if let Some((i, item)) = visible.get(selected) {
+                            if let Some((i, item)) = visible.get(selected).filter(|(index, _)| {
+                                !matches!(kind, MenuKind::Operations)
+                                    || self.operation_enabled(self.menu_action(*index))
+                            }) {
+                                if matches!(kind, MenuKind::Operations) {
+                                    self.action_return = Some((selected, filter.clone()));
+                                }
                                 self.menu_select(kind, (*item).clone(), *i);
                             } else {
                                 self.modal = Some(Modal::Menu {
@@ -1599,10 +1939,25 @@ impl GitPane {
                                     selected = (selected + 1).min(visible.len().saturating_sub(1))
                                 }
                                 KeyCode::Up => selected = selected.saturating_sub(1),
+                                KeyCode::PageDown => {
+                                    selected = selected
+                                        .saturating_add(usize::from(self.body.height.max(1)))
+                                        .min(visible.len().saturating_sub(1))
+                                }
+                                KeyCode::PageUp => {
+                                    selected = selected
+                                        .saturating_sub(usize::from(self.body.height.max(1)))
+                                }
                                 KeyCode::Home => selected = 0,
                                 KeyCode::End => selected = visible.len().saturating_sub(1),
                                 KeyCode::Backspace => {
                                     filter.pop();
+                                    selected = 0;
+                                }
+                                KeyCode::Char('u')
+                                    if key.modifiers.contains(KeyModifiers::CONTROL) =>
+                                {
+                                    filter.clear();
                                     selected = 0;
                                 }
                                 KeyCode::Char(c)
@@ -1625,11 +1980,33 @@ impl GitPane {
                     }
                 }
             }
+            self.normalize_actions(matches!(
+                key.code,
+                KeyCode::Up | KeyCode::PageUp | KeyCode::End
+            ));
+            if self.modal.is_none()
+                && !self.busy
+                && let Some((selected, filter)) = self.action_return.take()
+            {
+                self.operations();
+                if let Some(Modal::Menu {
+                    selected: current,
+                    filter: current_filter,
+                    ..
+                }) = &mut self.modal
+                {
+                    *current = selected;
+                    *current_filter = filter;
+                }
+            }
             if self.modal.is_none()
                 && !self.busy
                 && let Some(scroll) = self.return_scroll.take()
             {
                 self.scroll = scroll;
+            }
+            if self.modal.is_none() && !self.busy {
+                self.restore_action_view();
             }
             self.sync_watch();
             self.pin();
@@ -1637,26 +2014,35 @@ impl GitPane {
         }
         if self.search_before.is_some() {
             match key.code {
-                KeyCode::Enter => {
-                    self.search_before = None;
+                KeyCode::Enter | KeyCode::Tab => {
+                    self.finish_search(false);
+                    return true;
                 }
                 KeyCode::Esc => {
-                    self.filter = self.search_before.take().unwrap();
+                    self.finish_search(true);
+                    return true;
+                }
+                KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown => {
+                    self.finish_search(false);
+                    if !self.busy {
+                        return self.key(key);
+                    }
+                    return true;
                 }
                 KeyCode::Backspace => {
-                    self.filter.pop();
+                    self.search_query_mut().pop();
                 }
                 KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    self.filter.clear()
+                    self.search_query_mut().clear()
                 }
                 KeyCode::Char(c)
                     if !key
                         .modifiers
                         .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
                 {
-                    self.filter.push(c)
+                    self.search_query_mut().push(c)
                 }
-                _ => {}
+                _ => return true,
             }
             self.scroll = 0;
             self.ensure_selection();
@@ -1698,7 +2084,7 @@ impl GitPane {
                 }
             }
             KeyCode::Char('/') if self.diff.is_none() && self.snapshot.is_some() => {
-                self.search_before = Some(self.filter.clone());
+                self.begin_search();
             }
             KeyCode::Char('p') if self.snapshot.is_some() => {
                 self.manual_pin = !self.manual_pin;
@@ -1884,7 +2270,8 @@ impl GitPane {
             Event::Paste(_) if self.busy => true,
             Event::Paste(text) => {
                 if self.search_before.is_some() {
-                    self.filter.push_str(&text.replace(['\r', '\n'], ""));
+                    self.search_query_mut()
+                        .push_str(&text.replace(['\r', '\n'], ""));
                     self.ensure_selection();
                     self.scroll = 0;
                 } else if let Some(Modal::Form { text: field, .. }) = &mut self.modal {
@@ -1894,6 +2281,43 @@ impl GitPane {
                 true
             }
             Event::Mouse(mouse) => {
+                let previous_commit_click = if matches!(
+                    mouse.kind,
+                    MouseEventKind::Down(_)
+                        | MouseEventKind::Drag(_)
+                        | MouseEventKind::ScrollDown
+                        | MouseEventKind::ScrollUp
+                ) {
+                    self.last_commit_click.take()
+                } else {
+                    None
+                };
+                if !self.busy && mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                    if self.modal.is_none() && contains(self.search_rect, mouse.column, mouse.row) {
+                        self.begin_search();
+                        if contains(self.search_clear_rect, mouse.column, mouse.row) {
+                            self.search_query_mut().clear();
+                            self.scroll = 0;
+                            self.ensure_selection();
+                        }
+                        return true;
+                    }
+                    if self.popup_area.height > 0
+                        && !contains(self.popup_area, mouse.column, mouse.row)
+                        && mouse.row < self.screen.bottom().saturating_sub(self.footer_height())
+                    {
+                        if matches!(self.modal, Some(Modal::Menu { .. } | Modal::Message(_))) {
+                            self.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+                        }
+                        return true;
+                    }
+                    if self.modal.is_none() && mouse.row > self.screen.y {
+                        self.finish_search(false);
+                        if self.busy {
+                            return true;
+                        }
+                    }
+                }
                 if self.busy {
                     match mouse.kind {
                         MouseEventKind::ScrollDown => {
@@ -1912,7 +2336,10 @@ impl GitPane {
                                 self.scroll = target.min(self.limit);
                             } else {
                                 let controls = self.controls(true);
-                                if mouse.row == self.screen.bottom().saturating_sub(2)
+                                if (self.diff.is_some()
+                                    || self.history.is_some()
+                                    || self.modal.is_some())
+                                    && mouse.row == self.screen.bottom().saturating_sub(2)
                                     && let Some(index) =
                                         control_rects(self.screen, mouse.row, &controls)
                                             .iter()
@@ -1934,16 +2361,6 @@ impl GitPane {
                     mouse.kind,
                     MouseEventKind::ScrollDown | MouseEventKind::ScrollUp
                 ) {
-                    if self.modal.is_some() {
-                        return self.key(KeyEvent::new(
-                            if mouse.kind == MouseEventKind::ScrollDown {
-                                KeyCode::Down
-                            } else {
-                                KeyCode::Up
-                            },
-                            KeyModifiers::NONE,
-                        ));
-                    }
                     let target = if mouse.kind == MouseEventKind::ScrollDown {
                         self.scroll.saturating_add(3).min(self.limit)
                     } else {
@@ -1978,20 +2395,20 @@ impl GitPane {
                         return self.key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
                     }
                     let button = page_header_rects(area, reserve, true)[1];
-                    if self.modal.is_none()
-                        && self.search_before.is_none()
-                        && contains(button, mouse.column, mouse.row)
-                    {
+                    if self.can_switch_workspace() && contains(button, mouse.column, mouse.row) {
                         return false;
                     }
                     return true;
                 }
                 if self.modal.is_none() && self.search_before.is_none() {
-                    if self
+                    if let Some(anchor) = self
                         .repository_button
-                        .is_some_and(|rect| contains(rect, mouse.column, mouse.row))
+                        .filter(|rect| contains(*rect, mouse.column, mouse.row))
                     {
-                        return self.key(KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE));
+                        self.repository_details();
+                        self.repository_anchor = Some(anchor);
+                        self.pin();
+                        return true;
                     }
                     if self
                         .pin_button
@@ -2002,20 +2419,20 @@ impl GitPane {
                 }
                 if self.modal.is_none()
                     && self.search_before.is_none()
-                    && self
+                    && let Some(anchor) = self
                         .branch_button
-                        .is_some_and(|rect| contains(rect, mouse.column, mouse.row))
+                        .filter(|rect| contains(*rect, mouse.column, mouse.row))
                 {
-                    return self.key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE));
+                    let handled = self.key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE));
+                    if self.busy {
+                        self.branch_anchor = Some(anchor);
+                    }
+                    return handled;
                 }
                 for navigation in [false, true] {
-                    if navigation && self.screen.height < 7 {
+                    let Some(row) = self.footer_row(navigation) else {
                         continue;
-                    }
-                    let row = self
-                        .screen
-                        .bottom()
-                        .saturating_sub(if navigation { 2 } else { 1 });
+                    };
                     if mouse.row != row {
                         continue;
                     }
@@ -2056,7 +2473,10 @@ impl GitPane {
                 if let Some(Modal::Menu { selected, .. }) = &mut self.modal {
                     if let Some((_, index)) = self.menu_rows.iter().find(|(r, _)| *r == row) {
                         *selected = *index;
+                        return self.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
                     }
+                } else if self.modal.is_some() {
+                    return true;
                 } else if let Some(diff) = &self.diff {
                     let Some(&line) = self.diff_rows.get(usize::from(row)) else {
                         return true;
@@ -2071,15 +2491,24 @@ impl GitPane {
                 } else if self.search_before.is_none()
                     && let Some((_, index)) = self.rows.iter().find(|(r, _)| *r == row)
                 {
-                    let selected = if self.history.is_some() {
-                        &mut self.history_selected
+                    let index = *index;
+                    if let Some(history) = &self.history {
+                        let Some(commit) = history.commits.get(index) else {
+                            return true;
+                        };
+                        self.history_selected = index;
+                        if previous_commit_click.as_ref().is_some_and(|(id, time)| {
+                            id == &commit.id && time.elapsed() <= Duration::from_millis(450)
+                        }) {
+                            return self.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+                        }
+                        self.last_commit_click = Some((commit.id.clone(), Instant::now()));
                     } else {
-                        &mut self.selected
-                    };
-                    if *selected == *index {
-                        return self.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+                        if self.selected == index {
+                            return self.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+                        }
+                        self.selected = index;
                     }
-                    *selected = *index;
                 }
                 true
             }
@@ -2120,22 +2549,29 @@ impl GitPane {
                     lines
                 }
                 Modal::Help(page) => help_content(*page, self.help_language, self.body.width),
-                Modal::Message(message) => std::iter::once(line("GIT · DETAILS", BLUE))
-                    .chain(message.lines().map(|s| {
-                        line(
-                            safe_text(s),
-                            if s.starts_with('+') && !s.starts_with("+++") {
-                                GREEN
-                            } else if s.starts_with('-') && !s.starts_with("---") {
-                                RED
-                            } else if s.starts_with("@@") || s.starts_with("diff --git") {
-                                BLUE
-                            } else {
-                                INK
-                            },
-                        )
-                    }))
-                    .collect(),
+                Modal::Message(message) | Modal::CommitDetails(message) => std::iter::once(line(
+                    if matches!(self.modal, Some(Modal::CommitDetails(_))) {
+                        "Log › Commit"
+                    } else {
+                        "GIT · DETAILS"
+                    },
+                    BLUE,
+                ))
+                .chain(message.lines().map(|s| {
+                    line(
+                        safe_text(s),
+                        if s.starts_with('+') && !s.starts_with("+++") {
+                            GREEN
+                        } else if s.starts_with('-') && !s.starts_with("---") {
+                            RED
+                        } else if s.starts_with("@@") || s.starts_with("diff --git") {
+                            BLUE
+                        } else {
+                            INK
+                        },
+                    )
+                }))
+                .collect(),
                 Modal::Confirm {
                     action,
                     description,
@@ -2156,7 +2592,6 @@ impl GitPane {
                             FormKind::Commit { .. } => "COMMIT · staged changes only",
                             FormKind::Create => "CREATE AND SWITCH BRANCH",
                             FormKind::Track(_) => "LOCAL TRACKING BRANCH NAME",
-                            FormKind::Search => "SEARCH COMMIT MESSAGES",
                         },
                         BLUE,
                     )];
@@ -2185,10 +2620,7 @@ impl GitPane {
                         last.spans
                             .push(Span::styled("▏", Style::default().fg(GOLD)));
                     }
-                    if matches!(kind, FormKind::Search) {
-                        lines.push(line("Title + body · literal text, case insensitive", SOFT));
-                        lines.push(line("Enter: search · Ctrl+U: clear · empty: all", SOFT));
-                    } else if matches!(kind, FormKind::Commit { .. }) {
+                    if matches!(kind, FormKind::Commit { .. }) {
                         lines.push(line("Ctrl+Enter / Review: confirm · Esc: Cancel", SOFT));
                     } else {
                         lines.push(line("Enter / Review: confirm · Esc: Cancel", SOFT));
@@ -2204,24 +2636,60 @@ impl GitPane {
                     let mut out = vec![
                         line(
                             match kind {
-                                MenuKind::Operations => "OPERATIONS",
-                                MenuKind::Branches => "BRANCHES",
-                                MenuKind::Fetch => "FETCH FROM",
-                                MenuKind::Push => "PUSH TO",
+                                MenuKind::Operations => {
+                                    if self.history.is_some() {
+                                        "Log actions".into()
+                                    } else {
+                                        self.file().map_or("Repository actions".into(), |file| {
+                                            format!(
+                                                "{}: {}",
+                                                if self.diff.is_some() {
+                                                    "Diff"
+                                                } else {
+                                                    "Target"
+                                                },
+                                                safe_text(&file.label())
+                                            )
+                                        })
+                                    }
+                                }
+                                MenuKind::Branches => "BRANCHES".into(),
+                                MenuKind::Fetch => "FETCH FROM".into(),
+                                MenuKind::Push => "PUSH TO".into(),
                             },
                             BLUE,
                         ),
                         line(format!("Search: {filter}▏"), SOFT),
                     ];
-                    for (i, item) in items
+                    if matches!(kind, MenuKind::Operations)
+                        && let Some(error) = &self.error
+                    {
+                        out.push(line(safe_text(error), RED));
+                    }
+                    for (i, (operation, item)) in items
                         .iter()
-                        .filter(|s| s.to_lowercase().contains(&filter.to_lowercase()))
+                        .enumerate()
+                        .filter(|(_, s)| s.to_lowercase().contains(&filter.to_lowercase()))
                         .enumerate()
                     {
                         self.menu_rows.push((out.len() as u16, i));
-                        out.push(line(
+                        let enabled = !matches!(kind, MenuKind::Operations)
+                            || self.operation_enabled(self.menu_action(operation));
+                        out.push(Line::styled(
                             format!("{} {item}", if *selected == i { "›" } else { " " }),
-                            if *selected == i { GOLD } else { INK },
+                            Style::default()
+                                .fg(if !enabled {
+                                    SOFT
+                                } else if *selected == i {
+                                    GOLD
+                                } else {
+                                    INK
+                                })
+                                .add_modifier(if enabled {
+                                    Modifier::empty()
+                                } else {
+                                    Modifier::DIM
+                                }),
                         ));
                     }
                     out
@@ -2293,25 +2761,6 @@ impl GitPane {
             out.push(line("✓ Working tree clean", GREEN));
             out.push(line("New changes will appear here.", SOFT));
         }
-        if (self.screen.width < 32 || self.screen.height < 16)
-            && (!self.filter.is_empty() || self.search_before.is_some())
-        {
-            out.push(line(
-                clipped(
-                    &format!(
-                        "/ {}{}",
-                        safe_text(&self.filter),
-                        if self.search_before.is_some() {
-                            "▏"
-                        } else {
-                            ""
-                        }
-                    ),
-                    usize::from(self.body.width),
-                ),
-                GOLD,
-            ));
-        }
         let visible = self.visible_files();
         if !self.filter.is_empty() && visible.is_empty() {
             out.push(line("No matching files · /: search · Esc: clear", SOFT));
@@ -2369,8 +2818,28 @@ impl GitPane {
         }
         out
     }
+    fn view_navigation_controls(&self) -> Vec<Control> {
+        let mut prev = Control::new("Prev(,)", ", Prev", KeyCode::Char(','));
+        let mut next = Control::new("Next(.)", ". Next", KeyCode::Char('.'));
+        if let Some(history) = &self.history {
+            prev.enabled = history.page > 0;
+            next.enabled = history.has_more;
+        } else {
+            let position = self.diff_position();
+            prev.enabled = position.is_some_and(|(i, _)| i > 0);
+            next.enabled = position.is_some_and(|(i, n)| i + 1 < n);
+        }
+        vec![prev, next]
+    }
     fn controls(&self, navigation: bool) -> Vec<Control> {
         let control = |label, compact, code| Control::new(label, compact, code);
+        if navigation
+            && (self.actions_menu()
+                || matches!(self.modal, Some(Modal::CommitDetails(_)))
+                || (self.modal.is_none() && (self.diff.is_some() || self.history.is_some())))
+        {
+            return vec![];
+        }
         if self.busy && navigation {
             let mut up = control("Page up", "PgUp", KeyCode::PageUp);
             up.enabled = self.scroll > 0;
@@ -2384,7 +2853,7 @@ impl GitPane {
             }
             let mut clear = control("Clear(Ctrl+U)", "^U Clear", KeyCode::Char('u'));
             clear.key.modifiers = KeyModifiers::CONTROL;
-            clear.enabled = !self.filter.is_empty();
+            clear.enabled = !self.search_query().is_empty();
             return vec![
                 control("Apply(Enter)", "↵ Apply", KeyCode::Enter),
                 clear,
@@ -2431,52 +2900,8 @@ impl GitPane {
                 );
                 next.enabled = self.scroll < self.limit;
                 vec![previous, next]
-            } else if let Some(history) = &self.history {
-                let mut prev = control("Newer(,)", ", Newer", KeyCode::Char(','));
-                prev.enabled = history.page > 0;
-                let mut next = control("Older(.)", ". Older", KeyCode::Char('.'));
-                next.enabled = history.has_more;
-                let mut show = control("Details(Enter)", "↵ Show", KeyCode::Enter);
-                show.enabled = !history.commits.is_empty();
-                vec![
-                    prev,
-                    next,
-                    show,
-                    control("Files(Esc)", "Esc List", KeyCode::Esc),
-                ]
-            } else if self.diff.is_some() {
-                let position = self.diff_position();
-                let mut prev = control("Prev(,)", ", Prev", KeyCode::Char(','));
-                prev.enabled = position.is_some_and(|(i, _)| i > 0);
-                let mut next = control("Next(.)", ". Next", KeyCode::Char('.'));
-                next.enabled = position.is_some_and(|(i, n)| i + 1 < n);
-                vec![
-                    prev,
-                    next,
-                    control(
-                        if self.nowrap {
-                            "Wrap OFF(w)"
-                        } else {
-                            "Wrap ON(w)"
-                        },
-                        "w Wrap",
-                        KeyCode::Char('w'),
-                    ),
-                    control("Files(Esc)", "Esc List", KeyCode::Esc),
-                ]
             } else {
-                let mut open = control("Diff(Enter)", "↵ Diff", KeyCode::Enter);
-                open.enabled = self.file().is_some();
-                let mut commit = control("Commit(n)", "n Commit", KeyCode::Char('n'));
-                commit.enabled = self.snapshot.as_ref().is_some_and(|s| {
-                    s.files.iter().any(|f| f.group == Group::Index)
-                        && !s.files.iter().any(|f| f.group == Group::Conflict)
-                });
-                let mut log = control("Log(L)", "L Log", KeyCode::Char('L'));
-                log.enabled = self.snapshot.is_some();
-                let mut branches = control("Branch(b)", "b Branch", KeyCode::Char('b'));
-                branches.enabled = self.snapshot.is_some();
-                vec![open, commit, log, branches]
+                vec![]
             }
         } else {
             match &self.modal {
@@ -2492,6 +2917,7 @@ impl GitPane {
                         KeyCode::Esc,
                     ),
                 ],
+                Some(Modal::CommitDetails(_)) => vec![control("Back(Esc)", "Back", KeyCode::Esc)],
                 Some(Modal::Message(_) | Modal::OperationResult { .. }) => vec![control(
                     if self.history.is_some() {
                         "Log(Esc)"
@@ -2527,31 +2953,6 @@ impl GitPane {
                         KeyCode::Esc,
                     ),
                 ],
-                Some(Modal::Form {
-                    kind: FormKind::Search,
-                    text,
-                }) => {
-                    let mut clear = control("Clear(Ctrl+U)", "^U Clear", KeyCode::Char('u'));
-                    clear.key.modifiers = KeyModifiers::CONTROL;
-                    clear.enabled = !text.is_empty();
-                    vec![
-                        control(
-                            if text.trim().is_empty() {
-                                "All commits(Enter)"
-                            } else {
-                                "Search(Enter)"
-                            },
-                            if text.trim().is_empty() {
-                                "↵ All"
-                            } else {
-                                "↵ Search"
-                            },
-                            KeyCode::Enter,
-                        ),
-                        clear,
-                        control("Cancel(Esc)", "Esc Cancel", KeyCode::Esc),
-                    ]
-                }
                 Some(Modal::Form { kind, text }) => {
                     let commit = matches!(kind, FormKind::Commit { .. });
                     let mut submit = control(
@@ -2570,103 +2971,71 @@ impl GitPane {
                     vec![submit, control("Cancel(Esc)", "Esc Cancel", KeyCode::Esc)]
                 }
                 Some(Modal::Menu {
+                    kind,
                     items,
                     selected,
                     filter,
                     ..
                 }) => {
-                    let mut select = control("Select(Enter)", "↵ Select", KeyCode::Enter);
+                    let actions = matches!(kind, MenuKind::Operations);
+                    let mut select = control(
+                        if actions { "Choose" } else { "Select(Enter)" },
+                        if actions { "Choose" } else { "↵ Select" },
+                        KeyCode::Enter,
+                    );
                     select.enabled = items
                         .iter()
-                        .filter(|s| s.to_lowercase().contains(&filter.to_lowercase()))
+                        .enumerate()
+                        .filter(|(_, s)| s.to_lowercase().contains(&filter.to_lowercase()))
                         .nth(*selected)
-                        .is_some();
-                    vec![select, control("Back(Esc)", "Esc Back", KeyCode::Esc)]
+                        .is_some_and(|(index, _)| {
+                            !matches!(kind, MenuKind::Operations)
+                                || self.operation_enabled(self.menu_action(index))
+                        });
+                    vec![
+                        select,
+                        control(
+                            if actions { "Back" } else { "Back(Esc)" },
+                            if actions { "Back" } else { "Esc Back" },
+                            KeyCode::Esc,
+                        ),
+                    ]
                 }
                 None => {
-                    if self.history.is_some() {
-                        return vec![
-                            control("Refresh(r)", "r Refresh", KeyCode::Char('r')),
-                            control("Search(/)", "/ Search", KeyCode::Char('/')),
-                            control("Ops(o)", "o Ops", KeyCode::Char('o')),
+                    let mut open = control("Diff(Enter)", "Diff", KeyCode::Enter);
+                    open.enabled = self.file().is_some();
+                    let mut actions = control("Actions(o)", "Actions", KeyCode::Char('o'));
+                    actions.enabled = self.snapshot.is_some();
+                    if self.history.is_some() || self.diff.is_some() {
+                        let mut controls = self.view_navigation_controls();
+                        controls.extend([
+                            control("Refresh(r)", "Refresh", KeyCode::Char('r')),
+                            actions,
+                        ]);
+                        controls
+                    } else {
+                        vec![
+                            open,
+                            control("Refresh(r)", "Refresh", KeyCode::Char('r')),
+                            actions,
                         ]
-                        .into_iter()
-                        .map(|mut c| {
-                            c.enabled = !self.busy;
-                            c
-                        })
-                        .collect();
                     }
-                    let file = self.file();
-                    let index = file.as_ref().is_some_and(|f| f.group == Group::Index);
-                    let block = self
-                        .diff
-                        .as_ref()
-                        .is_some_and(|d| d.reason.is_none() && !d.hunks.is_empty());
-                    let mut single = control(
-                        if index && block {
-                            "Unstage block(u)"
-                        } else if index {
-                            "Unstage file(u)"
-                        } else {
-                            "Stage file(s)"
-                        },
-                        if index { "Unstage" } else { "Stage(s)" },
-                        KeyCode::Char(if index { 'u' } else { 's' }),
-                    );
-                    single.enabled = file.is_some() && !(index && block && self.diff_pending());
-                    single.minimum_width = if index { 7 } else { 0 };
-                    let mut stage = if self.diff.is_some() {
-                        if block
-                            && !index
-                            && file.as_ref().is_some_and(|f| f.group == Group::Worktree)
-                        {
-                            let mut stage =
-                                control("Stage block(h)", "Block(h)", KeyCode::Char('h'));
-                            stage.enabled = !self.diff_pending();
-                            stage
-                        } else if file
-                            .as_ref()
-                            .is_some_and(|file| file.group == Group::Worktree)
-                        {
-                            control("Refresh(r)", "r Refresh", KeyCode::Char('r'))
-                        } else {
-                            control("Repository(i)", "i Repo", KeyCode::Char('i'))
-                        }
-                    } else {
-                        let mut search = control("Search(/)", "/ Search", KeyCode::Char('/'));
-                        search.enabled = self.snapshot.is_some();
-                        search
-                    };
-                    stage.minimum_width = 0;
-                    let second = if file.as_ref().is_some_and(|f| f.group == Group::Worktree) {
-                        let mut discard = control(
-                            if block {
-                                "Discard block(d)"
-                            } else {
-                                "Discard file(d)"
-                            },
-                            "Discard",
-                            KeyCode::Char('d'),
-                        );
-                        discard.minimum_width = 7;
-                        discard.enabled = !self.diff_pending();
-                        discard
-                    } else {
-                        control("Refresh(r)", "r Refresh", KeyCode::Char('r'))
-                    };
-                    let mut menu = control("Ops(o)", "o Ops", KeyCode::Char('o'));
-                    menu.enabled = self.snapshot.is_some();
-                    vec![single, stage, second, menu]
                 }
             }
         };
-        if !navigation && self.modal.is_none() && self.history.is_none() && self.diff.is_none() {
-            controls.push(if self.filter.is_empty() {
-                control("Token Home(q)", "q Home", KeyCode::Char('q'))
-            } else {
-                control("Clear filter(q)", "q Clear", KeyCode::Char('q'))
-            });
+        if !navigation
+            && (self.modal.is_none()
+                || matches!(
+                    self.modal,
+                    Some(
+                        Modal::Help(_)
+                            | Modal::Message(_)
+                            | Modal::CommitDetails(_)
+                            | Modal::OperationResult { .. }
+                    )
+                ))
+        {
+            controls.push(control("Home(H)", "Home", KeyCode::Char('H')));
         }
         if self.busy {
             for control in &mut controls {
@@ -2679,7 +3048,7 @@ impl GitPane {
         let Some(diff) = &self.diff else {
             return vec![];
         };
-        let mut header: Vec<_> = vec![line("DIFF · Files(Esc)", BLUE)];
+        let mut header: Vec<_> = vec![line("DIFF", BLUE)];
         header.extend(
             wrap_line(line(diff.file.label(), BLUE), usize::from(width.max(1)))
                 .into_iter()
@@ -2722,20 +3091,9 @@ impl GitPane {
         header
     }
     fn repository_branch_label(&self, width: u16) -> String {
-        let Some(snapshot) = &self.snapshot else {
-            return String::new();
-        };
-        let available = width / 2;
-        if available < 4 {
-            return clipped(&snapshot.branch, usize::from(available));
-        }
-        format!(
-            "{} ▾",
-            clipped(
-                &format!("⑂ {}", snapshot.branch),
-                usize::from(available.saturating_sub(2))
-            )
-        )
+        self.snapshot.as_ref().map_or(String::new(), |snapshot| {
+            clipped(&format!("⑂ {} ▾", snapshot.branch), usize::from(width / 2))
+        })
     }
     fn repository_header(&self, width: u16) -> Vec<Line<'static>> {
         let Some(snapshot) = &self.snapshot else {
@@ -2784,7 +3142,7 @@ impl GitPane {
         let path = clipped(&name, usize::from(width).saturating_sub(branch.width() + 1));
         let mut identity = pair(&path, branch, width, SOFT);
         identity.spans[0].style = Style::default().fg(INK).add_modifier(Modifier::UNDERLINED);
-        identity.spans[2].style = Style::default().fg(SOFT);
+        identity.spans[2].style = Style::default().fg(SOFT).add_modifier(Modifier::UNDERLINED);
         let mode = self.pin_label(width);
         let mut context = vec![Span::styled(
             mode,
@@ -2813,24 +3171,7 @@ impl GitPane {
             format!(" · {upstream}"),
             Style::default().fg(SOFT),
         ));
-        let mut headers = vec![identity, Line::from(context), Line::from(summary)];
-        if !self.filter.is_empty() || self.search_before.is_some() {
-            headers.push(line(
-                clipped(
-                    &format!(
-                        "Search: {}{}",
-                        safe_text(&self.filter),
-                        if self.search_before.is_some() {
-                            "▏"
-                        } else {
-                            ""
-                        }
-                    ),
-                    usize::from(width),
-                ),
-                GOLD,
-            ));
-        }
+        let headers = vec![identity, Line::from(context), Line::from(summary)];
         headers
     }
     fn pin_label(&self, width: u16) -> &'static str {
@@ -2943,12 +3284,88 @@ impl GitPane {
         }
         out
     }
+    fn popup_layout(&self, area: Rect) -> Option<(Rect, Rect, &'static str)> {
+        let (height, title) = match &self.modal {
+            Some(Modal::Menu {
+                kind,
+                items,
+                filter,
+                ..
+            }) => (
+                (items
+                    .iter()
+                    .filter(|item| item.to_lowercase().contains(&filter.to_lowercase()))
+                    .count() as u16
+                    + 4)
+                .min(16),
+                match kind {
+                    MenuKind::Operations => " Actions ",
+                    MenuKind::Branches => " Branches ",
+                    MenuKind::Fetch => " Fetch ",
+                    MenuKind::Push => " Push ",
+                },
+            ),
+            Some(Modal::Message(message)) => (
+                16,
+                if message.starts_with("REPOSITORY\n") {
+                    " Repository "
+                } else {
+                    " Details "
+                },
+            ),
+            Some(Modal::Confirm { .. }) => (12, " Confirm "),
+            Some(Modal::Form { kind, .. }) => (
+                if matches!(kind, FormKind::Commit { .. }) {
+                    16
+                } else {
+                    8
+                },
+                " Input ",
+            ),
+            _ => return None,
+        };
+        let width = area.width.min(56);
+        let anchor = if matches!(&self.modal, Some(Modal::Message(message)) if message.starts_with("REPOSITORY\n"))
+        {
+            self.repository_anchor
+        } else if matches!(
+            self.modal,
+            Some(Modal::Menu {
+                kind: MenuKind::Branches,
+                ..
+            })
+        ) {
+            self.branch_anchor
+        } else {
+            None
+        };
+        let y = anchor.map(|rect| rect.bottom().clamp(area.y, area.bottom()));
+        let height = height.min(area.bottom().saturating_sub(y.unwrap_or(area.y)));
+        let rect = Rect::new(
+            anchor.map_or(area.x + area.width.saturating_sub(width) / 2, |rect| {
+                rect.x.clamp(area.x, area.right().saturating_sub(width))
+            }),
+            y.unwrap_or_else(|| area.bottom().saturating_sub(height)),
+            width,
+            height,
+        );
+        let mut inner = if width >= 4 && height >= 3 {
+            rect.inner(Margin::new(1, 1))
+        } else {
+            rect
+        };
+        inner.width = inner.width.saturating_sub(1);
+        Some((rect, inner, title))
+    }
     pub(super) fn draw(&mut self, frame: &mut ratatui::Frame) {
         let screen = frame.area();
         self.screen = screen;
         self.branch_button = None;
         self.repository_button = None;
         self.pin_button = None;
+        self.search_rect = Rect::default();
+        self.search_clear_rect = Rect::default();
+        self.popup_area = Rect::default();
         self.ensure_selection();
         frame.render_widget(
             Block::default().style(Style::default().bg(BG).fg(INK)),
@@ -2957,17 +3374,28 @@ impl GitPane {
         if screen.width == 0 || screen.height == 0 {
             return;
         }
-        let margin = if screen.width >= 32 { 1 } else { 0 };
-        let area = screen.inner(Margin::new(margin, 0));
+        let area = screen;
         let mini = screen.height < 7;
-        let showing_diff = self.diff.is_some() && self.modal.is_none();
-        let showing_history = self.history.is_some() && self.modal.is_none();
-        let footer_height = if mini { 1 } else { 3 };
+        let footer_height = self.footer_height();
+        let popup = self.popup_layout(Rect::new(
+            area.x,
+            area.y + 1,
+            area.width,
+            area.height.saturating_sub(1 + footer_height),
+        ));
+        let showing_background = self.modal.is_none() || popup.is_some();
+        let mut showing_diff = self.diff.is_some() && showing_background;
+        let showing_history = self.history.is_some() && showing_background;
+        let search_height = if !showing_diff && showing_background {
+            if area.height >= 10 { 3 } else { 1 }
+        } else {
+            0
+        };
         let mut headers = if showing_diff {
             self.diff_header(area.width.saturating_sub(1))
         } else if showing_history {
             let history = self.history.as_ref().unwrap();
-            let mut header = vec![line("GIT LOG · Files(Esc)", BLUE)];
+            let mut header = vec![line("LOG", BLUE)];
             if let Some(snapshot) = &self.snapshot {
                 header.extend(wrap_line(
                     line(
@@ -2989,27 +3417,20 @@ impl GitPane {
                 ),
                 SOFT,
             ));
-            if !history.query.is_empty() {
-                header.extend(
-                    wrap_line(
-                        line(format!("Search: {}", safe_text(&history.query)), GOLD),
-                        usize::from(area.width.saturating_sub(1).max(1)),
-                    )
-                    .into_iter()
-                    .take(2),
-                );
-            }
             header.extend(wrap_line(
                 line("Enter: details · ,/.: pages · Esc: files", GOLD),
                 usize::from(area.width.saturating_sub(1).max(1)),
             ));
             header
-        } else if self.modal.is_none() {
+        } else if showing_background {
             self.repository_header(area.width.saturating_sub(1))
         } else {
             vec![]
         };
-        headers.truncate(usize::from(area.height.saturating_sub(footer_height + 2)));
+        headers.truncate(usize::from(
+            area.height
+                .saturating_sub(footer_height + search_height + 2),
+        ));
         let header_height = headers.len() as u16;
         let (header_area, reserve) = pulse_header_area(screen);
         draw_page_header(
@@ -3017,7 +3438,7 @@ impl GitPane {
             header_area,
             reserve,
             true,
-            self.modal.is_none() && !self.busy && self.search_before.is_none(),
+            self.can_switch_workspace(),
         );
         if header_area.width >= 10 {
             frame.render_widget(
@@ -3069,14 +3490,81 @@ impl GitPane {
                 }
             }
         }
-        let previous_width = self.body.width;
+        let previous_width = self.view_width;
         self.body = Rect::new(
             area.x,
-            area.y.saturating_add(1 + header_height),
+            area.y
+                .saturating_add(1 + header_height + search_height)
+                .min(area.bottom()),
             area.width.saturating_sub(1),
             area.height
-                .saturating_sub(1 + header_height + footer_height),
+                .saturating_sub(1 + header_height + search_height + footer_height),
         );
+        self.view_width = self.body.width;
+        if search_height > 0 {
+            self.search_rect = Rect::new(
+                area.x,
+                area.y + 1 + header_height,
+                area.width,
+                search_height,
+            );
+            self.search_clear_rect = draw_search_field(
+                frame,
+                self.search_rect,
+                self.search_query(),
+                self.search_before.is_some(),
+                !self.busy && self.modal.is_none(),
+                if showing_history {
+                    "Search commits (/)"
+                } else {
+                    "Search files (/)"
+                },
+            );
+        }
+        if let Some((rect, inner, title)) = popup {
+            let modal = self.modal.take();
+            let background = self.lines();
+            let background_scroll = self.return_scroll.unwrap_or(self.scroll).min(
+                (background.len().min(u16::MAX as usize) as u16).saturating_sub(self.body.height),
+            );
+            frame.render_widget(
+                Paragraph::new(background).scroll((
+                    background_scroll,
+                    if showing_diff && self.nowrap {
+                        self.horizontal
+                    } else {
+                        0
+                    },
+                )),
+                self.body,
+            );
+            self.modal = modal;
+            self.popup_area = rect;
+            frame.render_widget(Clear, rect);
+            let block = if matches!(
+                self.modal,
+                Some(Modal::Menu {
+                    kind: MenuKind::Operations | MenuKind::Branches,
+                    ..
+                })
+            ) || matches!(&self.modal, Some(Modal::Message(message)) if message.starts_with("REPOSITORY\n"))
+            {
+                popup_block(rect, title, false)
+            } else {
+                Block::default()
+                    .borders(if rect.width >= 4 && rect.height >= 3 {
+                        Borders::ALL
+                    } else {
+                        Borders::NONE
+                    })
+                    .title(title)
+                    .border_style(Style::default().fg(SOFT))
+                    .style(Style::default().bg(BG))
+            };
+            frame.render_widget(block, rect);
+            self.body = inner;
+            showing_diff = false;
+        }
         if showing_diff && previous_width != self.body.width && self.diff_anchor.is_none() {
             self.diff_anchor = self.diff_rows.get(usize::from(self.scroll)).copied();
         }
@@ -3119,6 +3607,7 @@ impl GitPane {
                 }
             }
         } else if !self.busy
+            && !self.menu_scroll_manual
             && let Some(Modal::Menu { selected, .. }) = &self.modal
             && let Some((row, _)) = self.menu_rows.iter().find(|(_, i)| i == selected)
         {
@@ -3154,7 +3643,12 @@ impl GitPane {
                 &mut state,
             );
         }
-        if !mini {
+        if !mini
+            && !self.actions_menu()
+            && ((self.modal.is_some() && !matches!(self.modal, Some(Modal::CommitDetails(_))))
+                || (self.diff.is_none() && self.history.is_none())
+                || self.view_status_visible())
+        {
             let status = if self.busy {
                 self.operation.map_or("Working…".into(), |(name, start)| {
                     let elapsed = format!(" · {}s", start.elapsed().as_secs());
@@ -3168,7 +3662,7 @@ impl GitPane {
                     )
                 })
             } else if self.preview_refreshing.load(Ordering::Relaxed) {
-                "Updating Diff… · scrolling available".into()
+                "Updating Diff…".into()
             } else if let Some(error) = &self.error {
                 if self.modal.is_some() {
                     format!("! {error}")
@@ -3180,10 +3674,6 @@ impl GitPane {
             } else if let Some(modal) = &self.modal {
                 match modal {
                     Modal::Menu { .. } => "Type to filter · ↑↓ select · Enter open · Esc back",
-                    Modal::Form {
-                        kind: FormKind::Search,
-                        ..
-                    } => "Enter search · Ctrl+U clear · empty search: all commits",
                     Modal::Form {
                         kind: FormKind::Commit { .. },
                         ..
@@ -3198,6 +3688,7 @@ impl GitPane {
                         "l 中/英 · ↑↓ 滚动 · ? / Esc 返回",
                         "l 中文/EN · ↑↓ scroll · ? / Esc back",
                     ),
+                    Modal::CommitDetails(_) => "",
                     Modal::Message(_) | Modal::OperationResult { .. } => {
                         "↑↓ / PgUp / PgDn scroll · Esc back"
                     }
@@ -3243,27 +3734,20 @@ impl GitPane {
                         SOFT
                     }),
                 ),
-                Rect::new(area.x, screen.bottom() - 3, area.width, 1),
+                Rect::new(area.x, screen.bottom() - footer_height, area.width, 1),
             );
         }
         for navigation in [true, false] {
-            if navigation && mini {
+            let Some(row) = self.footer_row(navigation) else {
                 continue;
-            }
-            let row = screen
-                .bottom()
-                .saturating_sub(if navigation { 2 } else { 1 });
+            };
             let controls = self.controls(navigation);
-            for (control, rect) in controls.iter().zip(control_rects(screen, row, &controls)) {
+            for button in control_buttons(screen, row, &controls) {
                 frame.render_widget(
-                    Paragraph::new(control.label(rect.width))
+                    Paragraph::new(button.label)
                         .alignment(Alignment::Center)
-                        .style(
-                            Style::default()
-                                .fg(if control.enabled { BLUE } else { SOFT })
-                                .bg(if control.enabled { RAIL } else { BG }),
-                        ),
-                    rect,
+                        .style(footer_style(button.key, button.enabled)),
+                    button.rect,
                 );
             }
         }
@@ -3507,7 +3991,6 @@ struct Control {
     compact: &'static str,
     key: KeyEvent,
     enabled: bool,
-    minimum_width: u16,
 }
 impl Control {
     fn new(label: &'static str, compact: &'static str, code: KeyCode) -> Self {
@@ -3516,46 +3999,49 @@ impl Control {
             compact,
             key: KeyEvent::new(code, KeyModifiers::NONE),
             enabled: true,
-            minimum_width: 0,
         }
     }
-    fn label(&self, width: u16) -> String {
-        if self.label.width() <= usize::from(width) {
-            self.label.into()
-        } else if self.compact.width() <= usize::from(width) {
-            self.compact.into()
-        } else {
-            let key = match self.key.code {
-                KeyCode::Char(c) => c.to_string(),
-                KeyCode::Esc => "Esc".into(),
-                KeyCode::Enter => "↵".into(),
-                KeyCode::Up => "↑".into(),
-                KeyCode::Down => "↓".into(),
-                KeyCode::PageUp => "PgUp".into(),
-                KeyCode::PageDown => "PgDn".into(),
-                _ => String::new(),
-            };
-            clipped(&key, usize::from(width))
+    fn tiny_label(&self) -> &'static str {
+        match self.key.code {
+            KeyCode::Enter => "↵",
+            KeyCode::Esc => "Esc",
+            KeyCode::Up => "↑",
+            KeyCode::Down => "↓",
+            KeyCode::PageUp => "PgUp",
+            KeyCode::PageDown => "PgDn",
+            KeyCode::Char('H') => "H",
+            KeyCode::Char('o') => "o",
+            KeyCode::Char('r') => "r",
+            KeyCode::Char('l') => "l",
+            KeyCode::Char('u') => "u",
+            KeyCode::Char(',') => ",",
+            KeyCode::Char('.') => ".",
+            KeyCode::Char('w') => "w",
+            _ => self.compact,
         }
     }
 }
+fn control_buttons(screen: Rect, row: u16, controls: &[Control]) -> Vec<FooterButton> {
+    layout_footer(
+        Rect::new(screen.x, row, screen.width, 1),
+        controls
+            .iter()
+            .map(|control| {
+                footer_control(
+                    [control.label, control.compact, control.tiny_label()],
+                    control.key.code,
+                    control.enabled,
+                )
+                .modified(control.key.modifiers)
+            })
+            .collect(),
+    )
+}
 fn control_rects(screen: Rect, row: u16, controls: &[Control]) -> Vec<Rect> {
-    let count = controls.len();
-    if count == 0 {
-        return vec![];
-    }
-    let constraints = controls.iter().map(|control| {
-        if control.minimum_width > screen.width / count as u16
-            && screen.width >= control.minimum_width + count as u16 - 1
-        {
-            Constraint::Min(control.minimum_width)
-        } else {
-            Constraint::Ratio(1, count as u32)
-        }
-    });
-    Layout::horizontal(constraints)
-        .split(Rect::new(screen.x, row, screen.width, 1))
-        .to_vec()
+    control_buttons(screen, row, controls)
+        .into_iter()
+        .map(|button| button.rect)
+        .collect()
 }
 fn range_start(value: &str) -> usize {
     value
@@ -3573,7 +4059,7 @@ fn range_end(value: &str) -> usize {
         .unwrap_or(0)
         .saturating_add(range.next().and_then(|s| s.parse().ok()).unwrap_or(1))
 }
-fn safe_text(text: &str) -> String {
+pub(super) fn safe_text(text: &str) -> String {
     text.chars()
         .flat_map(|c| {
             if c == '\t' {
@@ -3602,7 +4088,7 @@ fn split_display(text: &str, width: usize) -> Vec<String> {
     out.push(current);
     out
 }
-fn wrap_line(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
+pub(super) fn wrap_line(line: Line<'static>, width: usize) -> Vec<Line<'static>> {
     let style = line.spans.first().map_or(Style::default(), |s| s.style);
     let mut out = Vec::new();
     let mut current = String::new();
@@ -3695,7 +4181,7 @@ mod tests {
         assert!(
             pane.controls(false)
                 .iter()
-                .any(|c| c.key.code == KeyCode::Char('q') && c.label.contains("Home"))
+                .any(|c| c.key.code == KeyCode::Char('H') && c.label.contains("Home"))
         );
         pane.modal = Some(Modal::Form {
             kind: FormKind::Create,
@@ -3741,7 +4227,7 @@ mod tests {
             if width >= 20 {
                 assert!(text.contains("GIT"));
                 if width >= 32 {
-                    assert!(text.contains("Ops"));
+                    assert!(text.contains("Actions"));
                 }
             }
             if width >= 32 && height >= 12 {
@@ -3854,6 +4340,99 @@ mod tests {
         }
     }
     #[test]
+    fn repository_and_branch_popups_match_actions_border_and_open_below_names() {
+        let corners = |buffer: &ratatui::buffer::Buffer, rect: Rect| {
+            [
+                (rect.x, rect.y),
+                (rect.right() - 1, rect.y),
+                (rect.x, rect.bottom() - 1),
+                (rect.right() - 1, rect.bottom() - 1),
+            ]
+            .map(|position| buffer[position].clone())
+        };
+        for (width, height) in [(20, 8), (32, 12), (48, 30), (100, 40)] {
+            let mut pane = GitPane::default();
+            pane.apply_snapshot(Some(snapshot("/project")));
+            let (send, receive) = mpsc::sync_channel(4);
+            let (updates, responses) = mpsc::channel();
+            pane.requests = Some(send);
+            pane.updates = Some(responses);
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal.draw(|f| pane.draw(f)).unwrap();
+            pane.operations();
+            terminal.draw(|f| pane.draw(f)).unwrap();
+            let expected = corners(terminal.backend().buffer(), pane.popup_area);
+            pane.key(key(KeyCode::Esc));
+            terminal.draw(|f| pane.draw(f)).unwrap();
+            let repository = pane.repository_button.unwrap();
+            pane.input(&Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: repository.x,
+                row: repository.y,
+                modifiers: KeyModifiers::NONE,
+            }));
+            terminal.draw(|f| pane.draw(f)).unwrap();
+            assert_eq!(pane.popup_area.y, repository.bottom());
+            assert_eq!(
+                corners(terminal.backend().buffer(), pane.popup_area),
+                expected
+            );
+            pane.key(key(KeyCode::Esc));
+            terminal.draw(|f| pane.draw(f)).unwrap();
+            let branch = pane.branch_button.unwrap();
+            pane.input(&Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: branch.x,
+                row: branch.y,
+                modifiers: KeyModifiers::NONE,
+            }));
+            assert!(matches!(
+                receive.try_recv().unwrap(),
+                Request::Menu(_, MenuKind::Branches)
+            ));
+            updates
+                .send(Response::Menu(
+                    MenuKind::Branches,
+                    Ok(vec!["main".into(), "topic".into()]),
+                ))
+                .unwrap();
+            pane.poll();
+            terminal.draw(|f| pane.draw(f)).unwrap();
+            assert_eq!(pane.popup_area.y, branch.bottom());
+            assert_eq!(pane.popup_area.x, branch.x.min(width - width.min(56)));
+            assert!(pane.popup_area.bottom() <= height - pane.footer_height());
+            assert_eq!(
+                corners(terminal.backend().buffer(), pane.popup_area),
+                expected
+            );
+            // Clicking above the menu dismisses it without reopening a popup.
+            pane.input(&Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: branch.x,
+                row: branch.y,
+                modifiers: KeyModifiers::NONE,
+            }));
+            assert!(pane.modal.is_none());
+            assert!(receive.try_recv().is_err());
+            pane.key(key(KeyCode::Char('b')));
+            assert!(pane.branch_anchor.is_none());
+            assert!(matches!(
+                receive.try_recv().unwrap(),
+                Request::Menu(_, MenuKind::Branches)
+            ));
+            updates
+                .send(Response::Menu(
+                    MenuKind::Branches,
+                    Ok(vec!["main".into(), "topic".into()]),
+                ))
+                .unwrap();
+            pane.poll();
+            terminal.draw(|f| pane.draw(f)).unwrap();
+            assert_eq!(pane.popup_area.bottom(), height - pane.footer_height());
+        }
+    }
+
+    #[test]
     fn branch_button_hit_area_tracks_layout_and_is_inactive_outside_overview() {
         let mut pane = {
             let mut pane = GitPane::default();
@@ -3867,7 +4446,7 @@ mod tests {
         let wide = pane.branch_button.unwrap();
         let text = render(&mut pane, 20, 8);
         let compact = pane.branch_button.unwrap();
-        assert!(text.contains('▾'));
+        assert!(text.contains('⑂'));
         assert!(text.contains('…'));
         assert_ne!(wide, compact);
         let click = |column| {
@@ -4310,22 +4889,22 @@ mod tests {
         assert_eq!(diff.patch(hunk).unwrap(), original);
     }
     #[test]
-    fn wrap_button_and_hunk_navigation_use_visual_rows() {
+    fn actions_wrap_and_hunk_navigation_use_visual_rows() {
         let mut pane = diff_pane();
         render(&mut pane, 48, 20);
         pane.key(key(KeyCode::Char(']')));
         assert_eq!(pane.hunk, 1);
         assert_eq!(pane.scroll, pane.hunk_rows[1].min(pane.limit));
         let anchor = pane.diff_rows[usize::from(pane.scroll)];
-        pane.input(&Event::Mouse(MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column: 30,
-            row: 18,
-            modifiers: KeyModifiers::NONE,
-        }));
+        click_action(&mut pane, 18);
         assert!(pane.nowrap);
         render(&mut pane, 48, 20);
         assert!(pane.diff_rows[usize::from(pane.scroll)] <= anchor);
+        pane.operations();
+        assert!(
+            matches!(&pane.modal, Some(Modal::Menu { items, .. }) if items.iter().any(|item| item == "Wrap OFF(w)"))
+        );
+        pane.key(key(KeyCode::Esc));
         pane.key(key(KeyCode::Right));
         assert_eq!(pane.horizontal, 8);
         pane.key(key(KeyCode::Char('w')));
@@ -4355,9 +4934,10 @@ mod tests {
         assert_eq!(pane.selected, 1);
         let text = render(&mut pane, 48, 20);
         assert!(text.contains("File 2/2"));
-        assert!(text.contains("Unstage"));
+        assert!(text.contains("Actions"));
+        assert!(pane.operation_enabled(13));
         assert!(!text.contains("Discard(d)"));
-        let controls = pane.controls(true);
+        let controls = pane.controls(false);
         assert!(controls[0].enabled);
         assert!(!controls[1].enabled);
         pane.key(key(KeyCode::Esc));
@@ -4376,11 +4956,8 @@ mod tests {
             render(&mut pane, width, 20);
             for navigation in [false, true] {
                 let controls = pane.controls(navigation);
-                for (control, rect) in controls
-                    .iter()
-                    .zip(control_rects(pane.screen, 0, &controls))
-                {
-                    assert!(control.label(rect.width).width() <= usize::from(rect.width));
+                for button in control_buttons(pane.screen, 0, &controls) {
+                    assert!(button.label.width() <= usize::from(button.rect.width));
                 }
             }
         }
@@ -4392,17 +4969,8 @@ mod tests {
                 }
                 let (send, receive) = mpsc::sync_channel(1);
                 unstaged.requests = Some(send);
-                let text = render(&mut unstaged, width, 20);
-                let controls = unstaged.controls(false);
-                let rect = control_rects(unstaged.screen, 19, &controls)[2];
-                assert_eq!(controls[2].label(rect.width), "Discard", "{width} columns");
-                assert!(text.contains("Discard"));
-                unstaged.input(&Event::Mouse(MouseEvent {
-                    kind: MouseEventKind::Down(MouseButton::Left),
-                    column: rect.right() - 1,
-                    row: rect.y,
-                    modifiers: KeyModifiers::NONE,
-                }));
+                render(&mut unstaged, width, 20);
+                click_action(&mut unstaged, if block { 14 } else { 2 });
                 let Some(Modal::Confirm { action, .. }) = unstaged.modal else {
                     panic!("Discard must require confirmation");
                 };
@@ -4418,29 +4986,16 @@ mod tests {
             staged.diff = None;
             let (send, receive) = mpsc::sync_channel(1);
             staged.requests = Some(send);
-            let text = render(&mut staged, width, 20);
-            let controls = staged.controls(false);
-            let rect = control_rects(staged.screen, 19, &controls)[0];
-            assert_eq!(controls[0].label(rect.width), "Unstage", "{width} columns");
-            assert!(text.contains("Unstage"));
-            staged.input(&Event::Mouse(MouseEvent {
-                kind: MouseEventKind::Down(MouseButton::Left),
-                column: rect.right() - 1,
-                row: rect.y,
-                modifiers: KeyModifiers::NONE,
-            }));
+            render(&mut staged, width, 20);
+            click_action(&mut staged, 1);
             assert!(
                 matches!(receive.try_recv().unwrap(), Request::Execute(_, Action::Unstage(file)) if file.path.as_path() == std::path::Path::new("staged.rs"))
             );
         }
         render(&mut pane, 48, 20);
-        assert!(!pane.controls(true)[0].enabled);
-        pane.input(&Event::Mouse(MouseEvent {
-            kind: MouseEventKind::Down(MouseButton::Left),
-            column: 42,
-            row: 18,
-            modifiers: KeyModifiers::NONE,
-        }));
+        assert!(!pane.controls(false)[0].enabled);
+        let home = pane.controls(false).len() - 1;
+        click_footer(&mut pane, false, home);
         assert!(pane.diff.is_none());
         render(&mut pane, 48, 20);
         let (header, _) = pulse_header_area(pane.screen);
@@ -4459,7 +5014,7 @@ mod tests {
         let (send, receive) = mpsc::sync_channel(2);
         pane.requests = Some(send);
         render(&mut pane, 48, 20);
-        click_footer(&mut pane, false, 1);
+        click_action(&mut pane, 12);
         assert!(matches!(
             receive.try_recv().unwrap(),
             Request::Execute(
@@ -4492,7 +5047,7 @@ mod tests {
         ));
     }
     #[test]
-    fn status_is_above_both_button_rows() {
+    fn status_is_above_the_single_button_row() {
         let mut pane = diff_pane();
         pane.notice = "Staged all changes".into();
         let mut terminal = ratatui::Terminal::new(TestBackend::new(48, 20)).unwrap();
@@ -4502,9 +5057,10 @@ mod tests {
                 .map(|x| terminal.backend().buffer()[(x, y)].symbol())
                 .collect::<String>()
         };
-        assert!(row(17).contains("Staged all changes"));
-        assert!(row(18).contains("Wrap"));
-        assert!(row(19).contains("Block(h)"));
+        assert!(row(18).contains("Staged all changes"));
+        assert!(row(19).contains("Actions"));
+        assert!(row(19).contains("Prev") && row(19).contains("Next"));
+        assert!(!row(19).contains("Wrap"));
     }
     #[test]
     fn header_switch_returns_to_token_without_losing_diff_and_title_keeps_context() {
@@ -4521,7 +5077,14 @@ mod tests {
                 .header_switch_rect(area, reserve == 4),
                 parts[1]
             );
-            assert!(text.contains("GIT") && text.contains("[Token(g)]"));
+            assert!(
+                text.contains("GIT")
+                    && text.contains(match width {
+                        20 => "[T]",
+                        32 => "TOKEN",
+                        _ => "[TOKEN]",
+                    })
+            );
             let click = |column| {
                 Event::Mouse(MouseEvent {
                     kind: MouseEventKind::Down(MouseButton::Left),
@@ -4560,7 +5123,7 @@ mod tests {
         }
     }
     fn click_footer(pane: &mut GitPane, navigation: bool, index: usize) {
-        let row = pane.screen.bottom() - if navigation { 2 } else { 1 };
+        let row = pane.footer_row(navigation).expect("Footer row visible");
         let rect = control_rects(pane.screen, row, &pane.controls(navigation))[index];
         pane.input(&Event::Mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
@@ -4568,6 +5131,552 @@ mod tests {
             row,
             modifiers: KeyModifiers::NONE,
         }));
+    }
+    fn click_action(pane: &mut GitPane, index: usize) {
+        pane.key(key(KeyCode::Char('o')));
+        let index = pane
+            .action_ids
+            .iter()
+            .position(|action| *action == index)
+            .expect("Action unavailable on this page");
+        let Some(Modal::Menu { selected, .. }) = &mut pane.modal else {
+            panic!("Actions missing")
+        };
+        *selected = index;
+        render(pane, pane.screen.width, pane.screen.height);
+        let row = pane
+            .menu_rows
+            .iter()
+            .find(|(_, item)| *item == index)
+            .unwrap()
+            .0;
+        pane.input(&Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: pane.body.x,
+            row: pane.body.y + row - pane.scroll,
+            modifiers: KeyModifiers::NONE,
+        }));
+    }
+    #[test]
+    fn actions_and_repository_popups_preserve_background_and_return_to_parent() {
+        for (width, height) in [(20, 8), (32, 18), (48, 30), (100, 40)] {
+            let mut pane = GitPane::default();
+            pane.apply_snapshot(Some(snapshot("/project")));
+            let (send, receive) = mpsc::sync_channel(4);
+            pane.requests = Some(send);
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+            terminal.draw(|f| pane.draw(f)).unwrap();
+            let before = terminal.backend().buffer().clone();
+            let save = |buffer: &ratatui::buffer::Buffer, name: &str| {
+                if let Some(path) = std::env::var_os("MUX_TEST_FILE_PREVIEW") {
+                    let cells: Vec<_> = buffer
+                        .content
+                        .iter()
+                        .map(|cell| {
+                            (
+                                cell.symbol(),
+                                format!("{:?}", cell.fg),
+                                format!("{:?}", cell.bg),
+                                cell.modifier.contains(Modifier::BOLD),
+                            )
+                        })
+                        .collect();
+                    std::fs::write(
+                        PathBuf::from(path).join(format!("git-{name}-{width}.json")),
+                        serde_json::to_vec(
+                            &serde_json::json!({"width": width, "height": height, "cells": cells}),
+                        )
+                        .unwrap(),
+                    )
+                    .unwrap();
+                }
+            };
+            save(&before, "files");
+            assert_eq!(pane.body.x, 0);
+            assert_eq!(pane.search_rect.x, 0);
+            assert_eq!(pane.search_rect.width, width);
+            pane.key(key(KeyCode::Char('o')));
+            terminal.draw(|f| pane.draw(f)).unwrap();
+            save(terminal.backend().buffer(), "actions");
+            assert!(pane.popup_area.height > 0 && pane.popup_area.bottom() == height - 1);
+            assert!(pane.body.right() < pane.popup_area.right());
+            assert!(pane.controls(true).is_empty());
+            assert_eq!(
+                pane.controls(false)
+                    .iter()
+                    .map(|control| control.label)
+                    .collect::<Vec<_>>(),
+                vec!["Choose", "Back"]
+            );
+            pane.key(key(KeyCode::Down));
+            assert!(matches!(pane.modal, Some(Modal::Menu { selected: 2, .. })));
+            click_footer(&mut pane, false, 1);
+            terminal.draw(|f| pane.draw(f)).unwrap();
+            assert!(pane.modal.is_none());
+            assert!(before.diff(terminal.backend().buffer()).is_empty());
+            click_action(&mut pane, 16);
+            terminal.draw(|f| pane.draw(f)).unwrap();
+            save(terminal.backend().buffer(), "repository");
+            assert!(
+                matches!(&pane.modal, Some(Modal::Message(message)) if message.contains("REPOSITORY") && message.contains("Branch:"))
+            );
+            pane.key(key(KeyCode::Esc));
+            assert!(
+                matches!(&pane.modal, Some(Modal::Menu { kind: MenuKind::Operations, selected, .. }) if pane.menu_action(*selected) == 16)
+            );
+            pane.key(key(KeyCode::Esc));
+            render(&mut pane, width, height);
+            let project = pane.repository_button.unwrap();
+            pane.input(&Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: project.x,
+                row: project.y,
+                modifiers: KeyModifiers::NONE,
+            }));
+            terminal.draw(|f| pane.draw(f)).unwrap();
+            save(terminal.backend().buffer(), "repository-anchored");
+            assert_eq!(pane.popup_area.y, project.bottom());
+            assert_eq!(pane.popup_area.x, project.x);
+            assert!(pane.popup_area.bottom() <= height - 3);
+            if pane.popup_area.bottom() < height - 3 {
+                pane.input(&Event::Mouse(MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: project.x,
+                    row: pane.popup_area.bottom(),
+                    modifiers: KeyModifiers::NONE,
+                }));
+            } else {
+                pane.key(key(KeyCode::Esc));
+            }
+            assert!(pane.modal.is_none());
+            render(&mut pane, width, height);
+            pane.key(key(KeyCode::Char('o')));
+            if let Some(Modal::Menu { selected, .. }) = &mut pane.modal {
+                *selected = 7;
+            }
+            render(&mut pane, width, height);
+            click_footer(&mut pane, false, 0);
+            assert!(matches!(
+                pane.modal,
+                Some(Modal::Form {
+                    kind: FormKind::Create,
+                    ..
+                })
+            ));
+            pane.input(&Event::Paste("new-branch".into()));
+            pane.key(key(KeyCode::Enter));
+            terminal.draw(|f| pane.draw(f)).unwrap();
+            assert!(matches!(
+                pane.modal,
+                Some(Modal::Confirm {
+                    action: Action::Create(_),
+                    ..
+                })
+            ));
+            pane.key(key(KeyCode::Esc));
+            assert!(matches!(pane.modal, Some(Modal::Menu { selected: 7, .. })));
+            pane.key(key(KeyCode::Esc));
+            assert!(receive.try_recv().is_err());
+        }
+    }
+
+    #[test]
+    fn footer_actions_stay_next_to_home_and_button_gaps_ignore_clicks() {
+        for width in [20, 32, 48, 100] {
+            for page in 0..3 {
+                let mut pane = diff_pane();
+                if page != 1 {
+                    pane.diff = None;
+                }
+                if page == 2 {
+                    pane.history = Some(service::History {
+                        commits: vec![],
+                        page: 0,
+                        has_more: false,
+                        query: String::new(),
+                    });
+                }
+                let (send, receive) = mpsc::sync_channel(4);
+                pane.requests = Some(send);
+                let mut terminal = Terminal::new(TestBackend::new(width, 30)).unwrap();
+                terminal.draw(|f| pane.draw(f)).unwrap();
+                let row = pane.footer_row(false).unwrap();
+                let buttons = control_buttons(pane.screen, row, &pane.controls(false));
+                assert_eq!(buttons[buttons.len() - 1].key, KeyCode::Char('H'));
+                assert_eq!(buttons[buttons.len() - 2].key, KeyCode::Char('o'));
+                for pair in buttons.windows(2) {
+                    assert_eq!(pair[1].rect.x, pair[0].rect.right() + 1);
+                    let gap = pair[0].rect.right();
+                    assert_eq!(terminal.backend().buffer()[(gap, row)].bg, BG);
+                    pane.input(&Event::Mouse(MouseEvent {
+                        kind: MouseEventKind::Down(MouseButton::Left),
+                        column: gap,
+                        row,
+                        modifiers: KeyModifiers::NONE,
+                    }));
+                    assert!(pane.modal.is_none());
+                    assert!(receive.try_recv().is_err());
+                }
+                let actions = &buttons[buttons.len() - 2];
+                pane.input(&Event::Mouse(MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: actions.rect.right() - 1,
+                    row,
+                    modifiers: KeyModifiers::NONE,
+                }));
+                assert!(matches!(
+                    pane.modal,
+                    Some(Modal::Menu {
+                        kind: MenuKind::Operations,
+                        ..
+                    })
+                ));
+                assert!(receive.try_recv().is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn diff_and_log_navigation_uses_bottom_row_without_hint_line() {
+        for width in [20, 32, 48, 100] {
+            for log in [false, true] {
+                let mut pane = diff_pane();
+                if log {
+                    pane.diff = None;
+                    pane.history = Some(service::History {
+                        commits: vec![],
+                        page: 1,
+                        has_more: true,
+                        query: "topic".into(),
+                    });
+                }
+                let (send, receive) = mpsc::sync_channel(4);
+                pane.requests = Some(send);
+                let mut terminal = Terminal::new(TestBackend::new(width, 20)).unwrap();
+                terminal.draw(|f| pane.draw(f)).unwrap();
+                let row = |y| {
+                    (0..width)
+                        .map(|x| terminal.backend().buffer()[(x, y)].symbol())
+                        .collect::<String>()
+                };
+                assert_eq!(pane.footer_height(), 1);
+                assert_eq!(pane.footer_row(false), Some(19));
+                assert_eq!(pane.footer_row(true), None);
+                if width >= 48 {
+                    assert!(row(19).contains("Prev") && row(19).contains("Next"));
+                }
+                let buttons = control_buttons(pane.screen, 19, &pane.controls(false));
+                assert!(
+                    buttons
+                        .iter()
+                        .all(|button| button.rect.y == 19 && button.rect.width > 0)
+                );
+                assert!(pane.controls(true).is_empty());
+                let text = (0..20).map(row).collect::<Vec<_>>().join("\n");
+                assert!(!text.contains("Files(Esc)"));
+                assert!(!text.contains("scroll"));
+                assert!(!text.contains("Wrap"));
+                assert_eq!(
+                    pane.view_navigation_controls()
+                        .iter()
+                        .map(|c| c.key.code)
+                        .collect::<Vec<_>>(),
+                    vec![KeyCode::Char(','), KeyCode::Char('.')]
+                );
+                click_footer(&mut pane, false, 0);
+                if log {
+                    assert!(
+                        matches!(receive.try_recv().unwrap(), Request::History(_, 0, query) if query == "topic")
+                    );
+                } else {
+                    assert!(receive.try_recv().is_err());
+                    click_footer(&mut pane, false, 1);
+                    assert!(
+                        matches!(receive.try_recv().unwrap(), Request::Diff(_, file, false) if file.path == std::path::Path::new("staged.rs"))
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn actions_follow_log_and_diff_context_and_choose_preserves_targets() {
+        for width in [20, 32, 48] {
+            let mut log = diff_pane();
+            log.diff = None;
+            log.history = Some(service::History {
+                commits: vec![],
+                page: 2,
+                has_more: true,
+                query: "topic".into(),
+            });
+            let (send, receive) = mpsc::sync_channel(4);
+            log.requests = Some(send);
+            render(&mut log, width, 30);
+            log.key(key(KeyCode::Char('o')));
+            let Some(Modal::Menu { items, .. }) = &log.modal else {
+                panic!()
+            };
+            assert!(items.iter().any(|item| item == "Older commits"));
+            assert!(
+                !items
+                    .iter()
+                    .any(|item| item.contains("Stage") || item.contains("Branch"))
+            );
+            for ch in "older".chars() {
+                log.key(key(KeyCode::Char(ch)));
+            }
+            let text = render(&mut log, width, 30);
+            assert!(text.contains("Choose") && text.contains("Back"));
+            assert!(!text.contains("Type to filter"));
+            assert!(log.controls(true).is_empty());
+            assert_eq!(log.controls(false).len(), 2);
+            click_footer(&mut log, false, 0);
+            assert!(
+                matches!(receive.try_recv().unwrap(), Request::History(root, 3, query) if root == std::path::Path::new("/project") && query == "topic")
+            );
+            log.busy = false;
+            let original = log.scroll;
+            click_action(&mut log, 27);
+            assert!(log.search_before.is_some() && log.modal.is_none());
+            log.input(&Event::Paste("new query".into()));
+            log.key(key(KeyCode::Esc));
+            assert_eq!(log.search_query(), "topic");
+            assert_eq!(log.scroll, original);
+            assert!(receive.try_recv().is_err());
+
+            let mut diff = diff_pane();
+            let (send, receive) = mpsc::sync_channel(4);
+            diff.requests = Some(send);
+            render(&mut diff, width, 30);
+            diff.scroll = 3.min(diff.limit);
+            let anchor = diff.diff_rows[usize::from(diff.scroll)];
+            diff.key(key(KeyCode::Char('o')));
+            let Some(Modal::Menu { items, .. }) = &diff.modal else {
+                panic!()
+            };
+            assert!(items.iter().any(|item| item == "Stage selected block"));
+            assert!(
+                !items
+                    .iter()
+                    .any(|item| item == "Fetch" || item == "Older commits")
+            );
+            assert!(items.iter().any(|item| item == "Wrap ON(w)"));
+            for ch in "wrap".chars() {
+                diff.key(key(KeyCode::Char(ch)));
+            }
+            let text = render(&mut diff, width, 30);
+            assert!(text.contains("Choose") && text.contains("Back"));
+            assert!(!text.contains("Type to filter"));
+            let border = diff.popup_area;
+            diff.input(&Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: border.x,
+                row: border.bottom() - 1,
+                modifiers: KeyModifiers::NONE,
+            }));
+            assert!(diff.actions_menu());
+            assert!(receive.try_recv().is_err());
+            click_footer(&mut diff, false, 0);
+            assert!(diff.nowrap && diff.modal.is_none());
+            render(&mut diff, width, 30);
+            assert!(
+                diff.diff_rows
+                    .iter()
+                    .skip(usize::from(diff.scroll))
+                    .take(usize::from(diff.body.height))
+                    .any(|line| *line == anchor)
+            );
+            assert!(receive.try_recv().is_err());
+            click_action(&mut diff, 20);
+            assert!(
+                matches!(receive.try_recv().unwrap(), Request::Diff(root, file, false) if root == std::path::Path::new("/project") && file.path == std::path::Path::new("staged.rs") && file.group == Group::Index)
+            );
+        }
+    }
+
+    #[test]
+    fn log_double_click_requires_same_commit_within_time_limit() {
+        for width in [20, 48, 100] {
+            let mut pane = GitPane::default();
+            pane.apply_snapshot(Some(snapshot("/project")));
+            pane.history = Some(service::History {
+                commits: (0..2)
+                    .map(|index| service::Commit {
+                        id: format!("commit{index}"),
+                        short: format!("{index:07x}"),
+                        date: "2026-10-14".into(),
+                        author: "Author".into(),
+                        subject: "Commit".into(),
+                        refs: String::new(),
+                    })
+                    .collect(),
+                page: 0,
+                has_more: false,
+                query: String::new(),
+            });
+            let (send, receive) = mpsc::sync_channel(4);
+            pane.requests = Some(send);
+            render(&mut pane, width, 30);
+            assert!(
+                !pane
+                    .controls(false)
+                    .iter()
+                    .any(|c| c.key.code == KeyCode::Enter)
+            );
+            let click = |pane: &GitPane, index| {
+                Event::Mouse(MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: pane.body.x,
+                    row: pane.body.y + pane.rows.iter().find(|(_, i)| *i == index).unwrap().0
+                        - pane.scroll,
+                    modifiers: KeyModifiers::NONE,
+                })
+            };
+            pane.input(&click(&pane, 0));
+            assert!(receive.try_recv().is_err());
+            pane.last_commit_click =
+                Some(("commit0".into(), Instant::now() - Duration::from_secs(1)));
+            pane.input(&click(&pane, 0));
+            assert!(receive.try_recv().is_err());
+            pane.input(&click(&pane, 1));
+            assert_eq!(pane.history_selected, 1);
+            assert!(receive.try_recv().is_err());
+            // Mouse release events between clicks preserve the double-click sequence.
+            pane.input(&Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Up(MouseButton::Left),
+                column: pane.body.x,
+                row: pane.body.y,
+                modifiers: KeyModifiers::NONE,
+            }));
+            pane.input(&click(&pane, 1));
+            assert!(matches!(receive.try_recv().unwrap(), Request::Show(_, id) if id == "commit1"));
+            pane.input(&click(&pane, 1));
+            assert!(receive.try_recv().is_err());
+        }
+    }
+
+    #[test]
+    fn log_actions_open_commit_as_a_page_and_back_restores_history() {
+        for width in [20, 32, 48, 100] {
+            let mut pane = diff_pane();
+            pane.diff = None;
+            pane.history = Some(service::History {
+                commits: vec![service::Commit {
+                    id: "abc123".into(),
+                    short: "abc123".into(),
+                    date: "2026-10-14".into(),
+                    author: "Author".into(),
+                    subject: "Selected commit".into(),
+                    refs: String::new(),
+                }],
+                page: 2,
+                has_more: true,
+                query: "topic".into(),
+            });
+            let (send, receive) = mpsc::sync_channel(4);
+            let (updates, responses) = mpsc::channel();
+            pane.requests = Some(send);
+            pane.updates = Some(responses);
+            render(&mut pane, width, 20);
+            let original = pane.scroll;
+            click_action(&mut pane, 24);
+            assert!(matches!(receive.try_recv().unwrap(), Request::Show(_, id) if id == "abc123"));
+            updates
+                .send(Response::Show(Ok(
+                    "Full commit message\n+patch\n".repeat(60)
+                )))
+                .unwrap();
+            pane.poll();
+            let text = render(&mut pane, width, 20);
+            assert!(text.contains("Log › Commit"));
+            assert_eq!(pane.popup_area, Rect::default());
+            assert_eq!(pane.body.width, width - 1);
+            assert!(pane.can_switch_workspace());
+            assert!(pane.action_return.is_none());
+            assert!(pane.controls(true).is_empty());
+            pane.key(key(KeyCode::End));
+            assert!(pane.scroll > 0);
+            pane.key(key(KeyCode::Left));
+            render(&mut pane, width, 20);
+            assert!(pane.modal.is_none());
+            assert_eq!(pane.scroll, original);
+            assert_eq!(pane.history.as_ref().unwrap().page, 2);
+            assert_eq!(pane.history.as_ref().unwrap().query, "topic");
+            assert_eq!(pane.history_selected, 0);
+            pane.key(key(KeyCode::Enter));
+            assert!(matches!(receive.try_recv().unwrap(), Request::Show(_, _)));
+            updates
+                .send(Response::Show(Err("Commit no longer available".into())))
+                .unwrap();
+            pane.poll();
+            assert!(matches!(pane.modal, Some(Modal::Message(_))));
+            render(&mut pane, width, 20);
+            pane.key(key(KeyCode::Esc));
+            render(&mut pane, width, 20);
+            assert_eq!(pane.scroll, original);
+            assert_eq!(pane.history.as_ref().unwrap().query, "topic");
+        }
+    }
+
+    #[test]
+    fn choose_next_block_uses_diff_scroll_limits_after_leaving_actions() {
+        let mut pane = diff_pane();
+        let (send, receive) = mpsc::sync_channel(4);
+        pane.requests = Some(send);
+        render(&mut pane, 32, 12);
+        let target = pane.hunk_rows[1].min(pane.limit);
+        assert!(target > 0);
+        pane.key(key(KeyCode::Char('o')));
+        for ch in "next block".chars() {
+            pane.key(key(KeyCode::Char(ch)));
+        }
+        render(&mut pane, 32, 12);
+        click_footer(&mut pane, false, 0);
+        assert!(pane.modal.is_none());
+        assert_eq!(pane.hunk, 1);
+        assert_eq!(pane.scroll, target);
+        assert!(receive.try_recv().is_err());
+    }
+
+    #[test]
+    fn inline_search_mouse_clear_cancel_and_arrows_keep_files_interactive() {
+        for (width, height) in [(20, 8), (32, 12), (48, 30)] {
+            let mut pane = GitPane::default();
+            pane.apply_snapshot(Some(snapshot("/project")));
+            let (send, receive) = mpsc::sync_channel(4);
+            pane.requests = Some(send);
+            render(&mut pane, width, height);
+            let rect = pane.search_rect;
+            assert!(rect.height > 0 && rect.bottom() <= pane.body.y);
+            pane.input(&Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: rect.x,
+                row: rect.y,
+                modifiers: KeyModifiers::NONE,
+            }));
+            pane.input(&Event::Paste("staged".into()));
+            assert_eq!(pane.visible_files(), vec![1]);
+            assert_eq!(pane.selected, 1);
+            pane.key(key(KeyCode::Esc));
+            assert!(pane.filter.is_empty());
+            assert_eq!(pane.selected, 0);
+            pane.key(key(KeyCode::Char('/')));
+            pane.input(&Event::Paste("staged".into()));
+            render(&mut pane, width, height);
+            let clear = pane.search_clear_rect;
+            pane.input(&Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: clear.x,
+                row: clear.y,
+                modifiers: KeyModifiers::NONE,
+            }));
+            assert!(pane.filter.is_empty());
+            pane.key(key(KeyCode::Down));
+            assert!(pane.search_before.is_none() && pane.modal.is_none());
+            assert_eq!(pane.selected, 1);
+            assert!(receive.try_recv().is_err());
+        }
     }
     #[test]
     fn form_buttons_review_with_the_correct_key_and_commit_back_keeps_draft() {
@@ -4621,33 +5730,36 @@ mod tests {
     }
     #[test]
     fn search_clear_button_restores_all_only_after_submit() {
-        let mut pane = GitPane {
-            modal: Some(Modal::Form {
-                kind: FormKind::Search,
-                text: "topic".into(),
-            }),
-            ..{
-                let mut pane = GitPane::default();
-                pane.apply_snapshot(Some(snapshot("/project")));
-                pane
-            }
-        };
+        let mut pane = GitPane::default();
+        pane.apply_snapshot(Some(snapshot("/project")));
+        pane.history = Some(service::History {
+            commits: vec![],
+            page: 0,
+            has_more: false,
+            query: "topic".into(),
+        });
         let (send, receive) = mpsc::sync_channel(2);
         pane.requests = Some(send);
         render(&mut pane, 80, 20);
-        click_footer(&mut pane, false, 1);
-        assert!(matches!(&pane.modal, Some(Modal::Form { text, .. }) if text.is_empty()));
+        let clear = pane.search_clear_rect;
+        pane.input(&Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: clear.x,
+            row: clear.y,
+            modifiers: KeyModifiers::NONE,
+        }));
+        assert!(pane.search_query().is_empty());
+        assert!(pane.search_before.is_some());
+        assert!(pane.modal.is_none());
         assert!(receive.try_recv().is_err());
-        let text = render(&mut pane, 80, 20);
-        assert!(text.contains("All commits(Enter)"));
         assert!(!pane.controls(false)[1].enabled);
-        click_footer(&mut pane, false, 0);
+        pane.key(key(KeyCode::Enter));
         assert!(
             matches!(receive.try_recv().unwrap(), Request::History(_, 0, query) if query.is_empty())
         );
     }
     #[test]
-    fn details_return_to_their_page_and_home_appears_only_on_git_root() {
+    fn details_return_to_their_page_and_home_stays_in_git() {
         let mut pane = diff_pane();
         for page in 0..3 {
             if page == 1 {
@@ -4667,7 +5779,7 @@ mod tests {
                 assert!(!controls.iter().any(|c| c.key.code == KeyCode::Char('g')));
                 assert_eq!(
                     controls.iter().any(|c| c.label.contains("Home")),
-                    page == 1 && !navigation
+                    !navigation
                 );
             }
             pane.modal = Some(Modal::Message("Details".into()));
@@ -4750,15 +5862,15 @@ mod tests {
                 }
                 if page == 0 {
                     assert_eq!(
-                        pane.controls(true)
+                        pane.controls(false)
                             .iter()
                             .map(|control| control.key.code)
                             .collect::<Vec<_>>(),
                         vec![
                             KeyCode::Enter,
-                            KeyCode::Char('n'),
-                            KeyCode::Char('L'),
-                            KeyCode::Char('b')
+                            KeyCode::Char('r'),
+                            KeyCode::Char('o'),
+                            KeyCode::Char('H')
                         ]
                     );
                 }
@@ -4778,6 +5890,110 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn popup_wheel_reverses_scroll_immediately_and_rail_reaches_both_ends() {
+        for width in [20, 32, 48] {
+            for kind in 0..5 {
+                let mut pane = GitPane::default();
+                pane.apply_snapshot(Some(snapshot("/project")));
+                let (send, receive) = mpsc::sync_channel(4);
+                pane.requests = Some(send);
+                match kind {
+                    0 => pane.operations(),
+                    1 => {
+                        pane.modal = Some(Modal::Menu {
+                            kind: MenuKind::Branches,
+                            items: (0..40).map(|i| format!("branch-{i}")).collect(),
+                            selected: 0,
+                            filter: String::new(),
+                        })
+                    }
+                    2 => pane.modal = Some(Modal::Message("Detail line\n".repeat(60))),
+                    3 => {
+                        pane.modal = Some(Modal::Confirm {
+                            action: Action::StageAll,
+                            description: "Confirm line\n".repeat(60).into(),
+                        })
+                    }
+                    _ => {
+                        pane.modal = Some(Modal::Form {
+                            kind: FormKind::Commit {
+                                head: None,
+                                index: vec![],
+                            },
+                            text: "Draft line\n".repeat(60),
+                        })
+                    }
+                }
+                render(&mut pane, width, 20);
+                assert!(pane.limit > 0);
+                if kind < 2 {
+                    pane.key(key(KeyCode::End));
+                } else {
+                    pane.scroll_to(pane.limit);
+                }
+                render(&mut pane, width, 20);
+                let bottom = pane.scroll;
+                assert!(bottom > 0);
+                pane.input(&Event::Mouse(MouseEvent {
+                    kind: MouseEventKind::ScrollUp,
+                    column: pane.body.x,
+                    row: pane.body.y,
+                    modifiers: KeyModifiers::NONE,
+                }));
+                render(&mut pane, width, 20);
+                assert!(
+                    pane.scroll < bottom,
+                    "Up wheel did not move popup kind {kind}, width {width}"
+                );
+                let up = pane.scroll;
+                pane.input(&Event::Mouse(MouseEvent {
+                    kind: MouseEventKind::ScrollDown,
+                    column: pane.body.x,
+                    row: pane.body.y,
+                    modifiers: KeyModifiers::NONE,
+                }));
+                render(&mut pane, width, 20);
+                assert!(pane.scroll > up);
+                for down in [false, true, false] {
+                    pane.input(&Event::Mouse(MouseEvent {
+                        kind: MouseEventKind::Drag(MouseButton::Left),
+                        column: pane.body.right(),
+                        row: if down {
+                            pane.body.bottom() - 1
+                        } else {
+                            pane.body.y
+                        },
+                        modifiers: KeyModifiers::NONE,
+                    }));
+                    render(&mut pane, width, 20);
+                    assert_eq!(pane.scroll, if down { pane.limit } else { 0 });
+                }
+                if kind < 2 {
+                    pane.key(key(KeyCode::PageDown));
+                    render(&mut pane, width, 20);
+                    assert!(!pane.menu_scroll_manual);
+                    let Some(Modal::Menu { selected, .. }) = &pane.modal else {
+                        panic!()
+                    };
+                    let row = pane
+                        .menu_rows
+                        .iter()
+                        .find(|(_, index)| index == selected)
+                        .unwrap()
+                        .0;
+                    assert!(row >= pane.scroll && row < pane.scroll + pane.body.height);
+                }
+                if kind == 4 {
+                    assert!(
+                        matches!(&pane.modal, Some(Modal::Form { text, .. }) if text == &"Draft line\n".repeat(60))
+                    );
+                }
+                assert!(receive.try_recv().is_err());
+            }
+        }
+    }
+
     #[test]
     fn menu_and_scroll_buttons_disable_at_boundaries_and_with_no_matches() {
         let mut pane = GitPane {
@@ -4822,12 +6038,7 @@ mod tests {
             let (send, receive) = mpsc::sync_channel(2);
             pane.requests = Some(send);
             render(&mut pane, 48, 20);
-            pane.input(&Event::Mouse(MouseEvent {
-                kind: MouseEventKind::Down(MouseButton::Left),
-                column: 2,
-                row: 19,
-                modifiers: KeyModifiers::NONE,
-            }));
+            click_action(&mut pane, 0);
             assert!(
                 matches!(receive.try_recv().unwrap(), Request::Execute(_, Action::Stage(f)) if f.path == std::path::Path::new("src/中文.rs"))
             );
@@ -4858,14 +6069,9 @@ mod tests {
         let (updates, responses) = mpsc::channel();
         pane.updates = Some(responses);
         render(&mut pane, 48, 20);
-        click_footer(&mut pane, false, 1);
-        assert!(matches!(
-            pane.modal,
-            Some(Modal::Form {
-                kind: FormKind::Search,
-                ..
-            })
-        ));
+        pane.key(key(KeyCode::Char('/')));
+        assert!(pane.search_before.is_some());
+        assert!(pane.modal.is_none());
         pane.input(&Event::Paste("git 中文".into()));
         assert!(receive.try_recv().is_err());
         pane.key(key(KeyCode::Enter));
@@ -4882,7 +6088,7 @@ mod tests {
             .unwrap();
         pane.poll();
         let text = render(&mut pane, 48, 20);
-        assert!(text.contains("Search: git"));
+        assert!(text.contains("git"));
         assert!(text.contains("No matching commits"));
         pane.key(key(KeyCode::Char('.')));
         assert!(
@@ -4936,13 +6142,21 @@ mod tests {
             .unwrap();
         pane.poll();
         let text = render(&mut pane, 48, 20);
-        assert!(text.contains("GIT LOG"));
-        assert!(!pane.controls(true)[0].enabled);
-        assert!(pane.controls(true)[1].enabled);
+        assert!(text.contains("LOG"));
+        assert!(!pane.controls(false)[0].enabled);
+        assert!(pane.controls(false)[1].enabled);
         pane.key(key(KeyCode::End));
         render(&mut pane, 48, 20);
         assert_eq!(pane.history_selected, 49);
+        let history_scroll = pane.scroll;
         let row = pane.rows.iter().find(|(_, i)| *i == 49).unwrap().0 - pane.scroll + pane.body.y;
+        pane.input(&Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 2,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }));
+        assert!(receive.try_recv().is_err());
         pane.input(&Event::Mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: 2,
@@ -4953,16 +6167,32 @@ mod tests {
             matches!(receive.try_recv().unwrap(), Request::Show(_, id) if id == format!("{:040x}", 49))
         );
         updates
-            .send(Response::Show(Ok(
-                "commit details\nFull message\n+new content".into(),
-            )))
+            .send(Response::Show(Ok(format!(
+                "commit details\nFull message\n{}",
+                "+new content\n".repeat(80)
+            ))))
             .unwrap();
         pane.poll();
-        assert!(render(&mut pane, 48, 20).contains("Full message"));
-        pane.key(key(KeyCode::Esc));
+        let text = render(&mut pane, 48, 20);
+        assert!(text.contains("Full message") && text.contains("Log › Commit"));
+        assert!(matches!(pane.modal, Some(Modal::CommitDetails(_))));
+        assert_eq!(pane.popup_area, Rect::default());
+        assert_eq!(pane.search_rect, Rect::default());
+        assert_eq!(pane.body.width, 47);
+        assert_eq!(pane.footer_height(), 1);
+        pane.key(key(KeyCode::End));
+        assert_eq!(pane.scroll, pane.limit);
+        pane.input(&Event::Mouse(MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: pane.body.x,
+            row: pane.body.y,
+            modifiers: KeyModifiers::NONE,
+        }));
+        assert!(pane.scroll < pane.limit);
+        click_footer(&mut pane, false, 0);
         render(&mut pane, 48, 20);
         assert_eq!(pane.history_selected, 49);
-        assert!(pane.scroll > 0);
+        assert_eq!(pane.scroll, history_scroll);
         pane.key(key(KeyCode::Char('.')));
         assert!(matches!(
             receive.try_recv().unwrap(),
@@ -4978,7 +6208,7 @@ mod tests {
             .unwrap();
         pane.poll();
         assert!(render(&mut pane, 32, 12).contains("No commits on this page"));
-        assert!(!pane.controls(true)[1].enabled);
+        assert!(!pane.controls(false)[1].enabled);
         pane.key(key(KeyCode::Esc));
         assert!(pane.history.is_none());
         assert!(render(&mut pane, 48, 20).contains("UNSTAGED"));
@@ -5030,7 +6260,7 @@ mod tests {
         assert!(pane.file().is_none());
         assert!(pane.controls(true).is_empty());
         pane.key(key(KeyCode::Enter));
-        assert!(!pane.controls(true)[0].enabled);
+        assert!(!pane.controls(false)[0].enabled);
         let (send, receive) = mpsc::sync_channel(1);
         pane.requests = Some(send);
         pane.key(key(KeyCode::Char('a')));
@@ -5066,7 +6296,7 @@ mod tests {
         pane.collapsed.push(Group::Index);
         render(&mut pane, 48, 30);
         assert!(pane.file().is_none());
-        assert!(!pane.controls(true)[0].enabled);
+        assert!(!pane.controls(false)[0].enabled);
         assert_eq!(pane.group_rows.len(), 2);
     }
     #[test]
@@ -5250,8 +6480,8 @@ mod tests {
         let (requests, receive) = mpsc::sync_channel(3);
         pane.requests = Some(requests);
         pane.preview_refreshing.store(true, Ordering::Relaxed);
-        assert!(!pane.controls(false)[1].enabled);
-        assert!(!pane.controls(false)[2].enabled);
+        assert!(!pane.operation_enabled(12));
+        assert!(!pane.operation_enabled(14));
         pane.key(key(KeyCode::Char('h')));
         pane.key(key(KeyCode::Char('d')));
         assert!(receive.try_recv().is_err());
@@ -5301,7 +6531,7 @@ mod tests {
         assert!(pane.scroll < pane.limit);
         render(&mut pane, 20, 10);
         let controls = pane.controls(true);
-        assert!(controls.iter().any(|control| control.enabled));
+        assert!(controls.is_empty());
         assert!(pane.controls(false).iter().all(|control| !control.enabled));
     }
     #[test]
@@ -5324,28 +6554,20 @@ mod tests {
         assert_eq!(remap_hunk(&old, &next, 0), 0);
     }
     #[test]
-    fn special_file_diff_uses_whole_file_controls_and_has_no_stage_block_button() {
+    fn special_file_diff_actions_disable_blocks_and_keep_whole_file_operations() {
         let mut pane = diff_pane();
         pane.diff.as_mut().unwrap().reason = Some("Binary file: whole-file operations only".into());
-        assert!(
-            pane.controls(false)
-                .iter()
-                .all(|control| control.key.code != KeyCode::Char('h'))
-        );
-        assert_eq!(pane.controls(false)[0].key.code, KeyCode::Char('s'));
-        assert_eq!(pane.controls(false)[2].label, "Discard file(d)");
+        assert!(pane.operation_enabled(0) && pane.operation_enabled(2));
+        assert!(!pane.operation_enabled(12) && !pane.operation_enabled(14));
+        assert!(!pane.operation_enabled(21) && !pane.operation_enabled(22));
+        let controls = pane.controls(false);
+        assert_eq!(controls[controls.len() - 2].key.code, KeyCode::Char('o'));
         let mut index = pane.diff.clone().unwrap();
         index.reason = None;
         index.file.group = Group::Index;
         pane.diff = Some(index);
-        assert!(
-            pane.controls(false)
-                .iter()
-                .all(|control| control.key.code != KeyCode::Char('h'))
-        );
-        assert_eq!(pane.controls(false)[0].label, "Unstage block(u)");
-        assert_eq!(pane.controls(false)[1].key.code, KeyCode::Char('i'));
-        assert_eq!(pane.controls(false)[2].key.code, KeyCode::Char('r'));
+        assert!(pane.operation_enabled(1) && pane.operation_enabled(13));
+        assert!(!pane.operation_enabled(0) && !pane.operation_enabled(12));
     }
     #[test]
     fn operations_menu_preserves_diff_scroll_on_cancel_and_block_submission() {
@@ -5361,11 +6583,7 @@ mod tests {
         assert_eq!(pane.scroll, original);
         let (send, receive) = mpsc::sync_channel(1);
         pane.requests = Some(send);
-        pane.key(key(KeyCode::Char('o')));
-        for _ in 0..12 {
-            pane.key(key(KeyCode::Down));
-        }
-        pane.key(key(KeyCode::Enter));
+        click_action(&mut pane, 12);
         assert_eq!(pane.scroll, original);
         assert!(pane.busy);
         assert!(matches!(
@@ -5538,5 +6756,51 @@ mod tests {
             requests.try_recv().unwrap(),
             Request::Commit { draft: None, .. }
         ));
+    }
+    #[test]
+    fn home_button_clears_git_subviews_without_switching_feature() {
+        for history in [false, true] {
+            let mut monitor = Monitor {
+                page: config::PulseStartPage::Git,
+                git: diff_pane(),
+                ..Default::default()
+            };
+            if history {
+                monitor.git.diff = None;
+                monitor.git.history = Some(service::History {
+                    commits: vec![],
+                    page: 1,
+                    has_more: false,
+                    query: "query".into(),
+                });
+            }
+            monitor.git.filter = "query".into();
+            monitor.git.scroll = 5;
+            render(&mut monitor.git, 32, 12);
+            let index = monitor
+                .git
+                .controls(false)
+                .iter()
+                .position(|c| c.key.code == KeyCode::Char('H'))
+                .unwrap();
+            click_footer(&mut monitor.git, false, index);
+            assert_eq!(monitor.page, config::PulseStartPage::Git);
+            assert!(monitor.git.diff.is_none());
+            assert!(monitor.git.history.is_none());
+            assert!(monitor.git.filter.is_empty());
+            assert_eq!(monitor.git.scroll, 0);
+            monitor.return_home();
+            assert_eq!(monitor.page, config::PulseStartPage::Git);
+        }
+        let mut pane = diff_pane();
+        pane.modal = Some(Modal::Form {
+            kind: FormKind::Create,
+            text: String::new(),
+        });
+        pane.key(key(KeyCode::Char('H')));
+        assert!(matches!(&pane.modal, Some(Modal::Form { text, .. }) if text == "H"));
+        pane.busy = true;
+        pane.return_home();
+        assert!(pane.modal.is_some());
     }
 }

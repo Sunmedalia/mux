@@ -155,6 +155,9 @@ impl Monitor {
         (text, SOFT)
     }
     pub(super) fn header_switch_rect(&self, area: Rect, mini: bool) -> Rect {
+        if self.page == config::PulseStartPage::File {
+            return file_page_header_rects(area)[1];
+        }
         page_header_rects(
             area,
             pulse_header_reserve(area, mini),
@@ -173,7 +176,7 @@ impl Monitor {
         } else {
             ""
         };
-        let x = page_header_rects(area, reserve, false)[1]
+        let x = file_header_rect(area, reserve, false)
             .right()
             .saturating_add(2);
         let width = area.right().saturating_sub(reserve).saturating_sub(x);
@@ -503,7 +506,13 @@ impl Monitor {
         }
         if area.width >= 10 {
             f.render_widget(
-                Paragraph::new("?(?)").style(Style::default().fg(SOFT)),
+                Paragraph::new("?(?)").style(Style::default().fg(SOFT).add_modifier(
+                    if self.files.help_available() {
+                        Modifier::empty()
+                    } else {
+                        Modifier::DIM
+                    },
+                )),
                 pulse_help_rect(area),
             );
         }
@@ -1151,7 +1160,16 @@ impl Monitor {
         self.browser_content(width)
     }
     pub(super) fn draw(&mut self, f: &mut ratatui::Frame) {
-        if self.page == config::PulseStartPage::Git {
+        if self.page == config::PulseStartPage::File {
+            self.files.draw(f);
+            let (area, _) = pulse_header_area(f.area());
+            draw_file_page_header(
+                f,
+                area,
+                self.files.can_switch_workspace(),
+                self.files.help_available(),
+            );
+        } else if self.page == config::PulseStartPage::Git {
             self.git.draw(f);
         } else {
             self.draw_content(f);
@@ -1159,11 +1177,7 @@ impl Monitor {
     }
     pub(super) fn account_body(&self, screen: Rect) -> Rect {
         let mini = screen.width < 32 || screen.height < 12;
-        let area = if mini {
-            screen
-        } else {
-            screen.inner(Margin::new(2, 0))
-        };
+        let area = screen;
         let body = if mini {
             mini_body(area)
         } else {
@@ -1200,7 +1214,7 @@ impl Monitor {
             self.draw_mini(f, area);
             return;
         }
-        let inner = area.inner(Margin::new(2, 0));
+        let inner = area;
         self.draw_token_header(f, inner, false);
         f.render_widget(
             Paragraph::new(if self.visual_mode { "T(v)" } else { "V(v)" })

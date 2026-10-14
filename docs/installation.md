@@ -33,7 +33,7 @@ Herdr 模式先检查 `herdr` 命令，不存在就提示“没有 Herdr”并�
 
 ### 下载 Release
 
-当前发布版 v0.1.21 仅提供 macOS Apple Silicon、Linux x86_64/ARM64 的三个发布包及各自的 SHA-256 校验文件，不提供 Windows 二进制文件。macOS/Linux 可使用下列命令下载；Windows 源码支持仍保留，安装方式见下文。
+当前发布版 v0.1.22 仅提供 macOS Apple Silicon、Linux x86_64/ARM64 的三个发布包及各自的 SHA-256 校验文件，不提供 Windows 二进制文件。macOS/Linux 可使用下列命令下载；Windows 源码支持仍保留，安装方式见下文。
 
 ```sh
 # macOS Apple Silicon
@@ -51,7 +51,7 @@ sudo install mux /usr/local/bin/mux
 
 ### Windows
 
-v0.1.21 不提供 Windows 发布包，请使用 Rust 1.88+ [从源码安装](#从源码安装)。如需旧版预编译程序，可下载历史 [v0.1.20 Windows x64 ZIP](https://github.com/Sunmedalia/mux/releases/download/v0.1.20/mux-windows-x86_64.zip) 与其 [SHA-256 文件](https://github.com/Sunmedalia/mux/releases/download/v0.1.20/mux-windows-x86_64.zip.sha256)；该程序不包含 v0.1.21 的更新。历史发布版的校验、解压、PowerShell/CMD 示例与平台使用说明见 [Windows 使用说明](../README-Windows.md)。下载旧版时使用以上固定版本链接，当前最新 Release 没有 Windows ZIP。
+v0.1.22 不提供 Windows 发布包，请使用 Rust 1.88+ [从源码安装](#从源码安装)。如需旧版预编译程序，可下载历史 [v0.1.20 Windows x64 ZIP](https://github.com/Sunmedalia/mux/releases/download/v0.1.20/mux-windows-x86_64.zip) 与其 [SHA-256 文件](https://github.com/Sunmedalia/mux/releases/download/v0.1.20/mux-windows-x86_64.zip.sha256)；该程序不包含 v0.1.22 的更新。历史发布版的校验、解压、PowerShell/CMD 示例与平台使用说明见 [Windows 使用说明](../README-Windows.md)。下载旧版时使用以上固定版本链接，当前最新 Release 没有 Windows ZIP。
 
 配置默认位于 `%APPDATA%\mux\config.toml`，状态与缓存位于 `%LOCALAPPDATA%\mux\state`、`cache`。关闭 TUI 不会停止后台代理；更新前先执行 `mux proxy stop`，移动程序前先卸载旧位置的自启项。
 

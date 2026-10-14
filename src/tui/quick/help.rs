@@ -50,12 +50,13 @@ pub(super) fn help_footer(area: Rect, language: HelpLanguage) -> Vec<FooterButto
                 KeyCode::Char('q'),
                 true,
             ),
+            footer_control(["Home(H)", "Home", "H"], KeyCode::Char('H'), true),
         ],
     )
 }
 
 pub(super) fn help_area(screen: Rect) -> (Rect, Rect) {
-    let area = screen.inner(Margin::new(if screen.width >= 32 { 2 } else { 0 }, 0));
+    let area = screen;
     let body = Rect::new(
         area.x,
         area.y.saturating_add(1),
@@ -72,6 +73,7 @@ pub(super) enum HelpPage {
     Charts,
     Git,
     Log,
+    File,
 }
 
 pub(super) fn help_content(
@@ -86,6 +88,7 @@ pub(super) fn help_content(
         HelpPage::Charts => language.text("图表帮助", "Token help · Charts"),
         HelpPage::Git => language.text("Git 帮助", "Git help"),
         HelpPage::Log => language.text("Git 历史帮助", "Git help · History"),
+        HelpPage::File => language.text("文件帮助", "File help"),
     };
     heading(&mut out, title, width);
     row(
@@ -108,6 +111,73 @@ pub(super) fn help_content(
     );
 
     match page {
+        HelpPage::File => {
+            for (key, chinese, english) in [
+                (
+                    "Alt+1/2/3",
+                    "切换 Token / Git / File，保留各页位置",
+                    "Select Token / Git / File; retain each page's position",
+                ),
+                (
+                    "↑↓ / ←→",
+                    "上下选择条目；左键返回上级，右键进入选中目录（文件不触发打开）。Enter 打开文件或目录，⌫ 也可返回上级；可双击打开、点击路径跳转",
+                    "Up/down select; Left goes to parent, Right enters the selected directory (files stay selected). Enter opens a file or directory; Backspace also goes up. Double-click to open, click breadcrumbs to navigate",
+                ),
+                (
+                    "右键 / o",
+                    "底部弹出 Actions，文件列表保留在背景；点击操作，Esc 或点击外部关闭。输入与删除确认也在底部弹窗，Back 返回菜单",
+                    "Bottom Actions popup keeps files in the background; click an action, Esc or outside click to close. Input and delete dialogs also open at the bottom; Back returns to Actions",
+                ),
+                (
+                    "滚轮 / 滚动条",
+                    "滚动文件列表；可点击或拖动右侧滚动条，后台刷新不阻塞操作",
+                    "Wheel / scrollbar: scroll files; click or drag the rail. Background refresh stays interactive",
+                ),
+                (
+                    "Settings → Pulse",
+                    "在 Mux TUI 的 Settings → Pulse → File icons 选择 Nerd / Unicode，左右键更改、Ctrl+S 保存；File 自动更新并保留浏览位置。Unicode 使用 emoji，Nerd 需要 Nerd Font；图标固定两列",
+                    "Mux TUI: Settings → Pulse → File icons; Left/Right selects Nerd / Unicode, Ctrl+S saves. File updates automatically and keeps its position. Unicode uses emoji; Nerd requires a Nerd Font. Icons occupy two columns",
+                ),
+                (
+                    "p",
+                    "固定目录；手动导航自动固定，取消后跟随原始 tab 的终端目录",
+                    "Pin directory; navigation pins automatically, unpin to follow the originating tab",
+                ),
+                (
+                    "/ / . / r",
+                    "点击列表顶部的单行筛选框或按 / 输入，实时筛选；Enter 完成，Esc 恢复，[x] 或 Ctrl+U 清空。./r 显示隐藏文件/刷新",
+                    "Click the top filter field or press /; filter live. Enter finishes, Esc restores, [x] / Ctrl+U clears. ./r: hidden files / refresh",
+                ),
+                (
+                    "n / N / R",
+                    "新建文件 / 新建目录 / 重命名",
+                    "New file / new directory / rename",
+                ),
+                (
+                    "c / m",
+                    "复制 / 移动到新路径；相对当前目录或绝对路径，不覆盖同名目标",
+                    "Copy / move to a new relative or absolute path; never overwrite",
+                ),
+                (
+                    "d",
+                    "确认后永久删除；目录连同内容删除，默认取消；符号链接仅删除链接",
+                    "Confirm permanent deletion; directories include contents, cancel by default; links delete only the link",
+                ),
+                (
+                    "VISUAL / EDITOR",
+                    "选择编辑器，未配置时依次使用 nvim / vim / vi；支持附带参数",
+                    "Editor configuration, including arguments; default nvim / vim / vi",
+                ),
+                (
+                    "H / q / Ctrl+C",
+                    "返回 File 首页（当前终端目录）/ 同上 / 退出；表单中 q、H 是文字",
+                    "File Home (terminal directory) / same / quit; q and H are text in forms",
+                ),
+            ] {
+                row(&mut out, key, language.text(chinese, english), width);
+            }
+        }
+
         HelpPage::Usage | HelpPage::Sessions | HelpPage::Charts => {
             heading(&mut out, language.text("常用操作", "Shortcuts"), width);
             row(
@@ -201,8 +271,8 @@ pub(super) fn help_content(
                 &mut out,
                 "g",
                 language.text(
-                    "切换 Git；Alt+1 / Alt+2 直选用量 / Git",
-                    "Switch to Git; Alt+1 / Alt+2: Token / Git",
+                    "切换 Git；Alt+1 / Alt+2 / Alt+3 直选用量 / Git / File",
+                    "Switch to Git; Alt+1 / Alt+2 / Alt+3: Token / Git / File",
                 ),
                 width,
             );
@@ -384,8 +454,8 @@ pub(super) fn help_content(
                 &mut out,
                 "/ · p · i",
                 language.text(
-                    "搜索路径 / 固定仓库 / 仓库详情",
-                    "Search paths / pin repo / repo details",
+                    "顶部常驻 Search 方框实时筛选路径；点击或 / 输入，Enter 完成，Esc 恢复，[x] / Ctrl+U 清空。p 固定；点击项目名在名称下展开详情，i 查看详情，点击分支名在名称下展开菜单并确认切换",
+                    "Persistent top Search field: click or / to filter paths live; Enter accepts, Esc restores, [x] / Ctrl+U clears. p pins; repository name opens details below it, i shows details; branch name opens a menu below it, with switch confirmation",
                 ),
                 width,
             );
@@ -398,15 +468,18 @@ pub(super) fn help_content(
             row(
                 &mut out,
                 ", / .",
-                language.text("上一个 / 下一个文件", "Previous / next file"),
+                language.text(
+                    "最底行 Prev / Next：切换文件或 Log 历史页",
+                    "Bottom Prev / Next: switch files or Log pages",
+                ),
                 width,
             );
             row(
                 &mut out,
                 "w / [ / ]",
                 language.text(
-                    "切换换行 / 上一个差异块 / 下一个差异块",
-                    "Toggle wrapping / previous hunk / next hunk",
+                    "Actions 中切换换行 / 上一个差异块 / 下一个差异块",
+                    "Wrapping in Actions / previous hunk / next hunk",
                 ),
                 width,
             );
@@ -480,8 +553,8 @@ pub(super) fn help_content(
                 &mut out,
                 "b / L / o",
                 language.text(
-                    "搜索分支 / 提交历史 / 全部操作与远端",
-                    "Search branches / history / operations & remotes",
+                    "分支选择 / 提交历史 / Actions 按 Files / Diff / Log 列出对应操作，底部仅 Choose / Back；Esc 或点击外部关闭，输入与确认 Esc 返回菜单",
+                    "Branch selection / history / Actions follows Files / Diff / Log, with only Choose / Back below; Esc or outside click closes. Esc from input or confirmation returns to Actions",
                 ),
                 width,
             );
@@ -520,8 +593,8 @@ pub(super) fn help_content(
                 &mut out,
                 "↑↓ / Enter",
                 language.text(
-                    "选择提交 / 查看消息、统计与差异",
-                    "Select commit / open message, stats and Diff",
+                    "单击选择提交；双击或 Enter 进入下一层详情页查看消息、统计与差异",
+                    "Click to select; double-click or Enter opens the full-page message, stats and Diff",
                 ),
                 width,
             );
@@ -538,8 +611,8 @@ pub(super) fn help_content(
                 &mut out,
                 "/",
                 language.text(
-                    "搜索提交标题与正文，Enter 应用",
-                    "Search title and body; Enter applies",
+                    "顶部常驻 Search 方框搜索提交标题与正文，点击或 / 输入，Enter 应用",
+                    "Persistent top Search field for title and body; click or / to edit, Enter applies",
                 ),
                 width,
             );
@@ -582,7 +655,7 @@ pub(super) fn help_content(
             );
         }
     }
-    row(&mut out, "q / Ctrl+C", language.text("q 非输入状态逐级返回，Git 根页返回 Token 首页；表单与搜索中 q 是文字，执行中不能返回。Ctrl+C 直接退出。", "q goes back outside text input; Git root returns to Token Home. In forms/search, q is text; busy operations block back. Ctrl+C exits directly."), width);
+    row(&mut out, "q / Ctrl+C", language.text("q 非输入状态逐级返回，Home(H) 返回当前功能首页，Git 根页保持在 Git；表单与搜索中 q 是文字，执行中不能返回。Ctrl+C 直接退出。", "q goes back outside text input; Home(H) returns to the current feature home; Git root stays in Git. In forms/search, q is text; busy operations block back. Ctrl+C exits directly."), width);
     out
 }
 

@@ -59,6 +59,7 @@ pub enum PulseStartPage {
     Sessions,
     Charts,
     Git,
+    File,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

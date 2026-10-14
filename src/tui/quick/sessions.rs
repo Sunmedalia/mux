@@ -135,7 +135,8 @@ impl Monitor {
                 area,
                 vec![
                     footer_control(["Refresh(r)", "Refresh", "r"], KeyCode::Char('r'), true),
-                    footer_control(["Sessions(q)", "Sessions", "q"], KeyCode::Char('q'), true),
+                    footer_control(["Back(q)", "Back", "q"], KeyCode::Char('q'), true),
+                    footer_control(["Home(H)", "Home", "H"], KeyCode::Char('H'), true),
                 ],
             );
         }
@@ -471,6 +472,7 @@ impl Monitor {
         let body = self.account_body(screen);
         match input {
             Event::Key(key) if key.kind == event::KeyEventKind::Press => match key.code {
+                KeyCode::Char('H') => self.return_home(),
                 KeyCode::Esc | KeyCode::Char('q') if self.session_browser.detail.is_some() => {
                     self.session_browser.detail = None;
                     self.scroll = self.session_browser.return_scroll;
@@ -769,11 +771,7 @@ mod tests {
         assert!(m.session_browser.detail.is_none());
     }
     fn click_footer(m: &mut Monitor, screen: Rect, index: usize) {
-        let area = if screen.width < 32 || screen.height < 12 {
-            screen
-        } else {
-            screen.inner(Margin::new(2, 0))
-        };
+        let area = screen;
         let button = &m.token_footer(area)[index];
         let input = Event::Mouse(event::MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
@@ -792,7 +790,7 @@ mod tests {
         assert_eq!(m.token_footer(screen).len(), 5);
         click_footer(&mut m, screen, 1);
         assert!(m.session_browser.detail.is_some());
-        assert_eq!(m.token_footer(screen).len(), 2);
+        assert_eq!(m.token_footer(screen).len(), 3);
         assert!(
             m.token_footer(screen)
                 .iter()
@@ -857,7 +855,7 @@ mod tests {
         }
         m.session_browser.detail = None;
         let screen = Rect::new(0, 0, 40, 15);
-        let button = &m.token_footer(screen.inner(Margin::new(2, 0)))[1];
+        let button = &m.token_footer(screen)[1];
         assert!(!button.enabled);
         assert_eq!(
             m.footer_key(
@@ -938,5 +936,22 @@ mod tests {
         let (row, _) = &layout.rows[m.session_browser.selected_index];
         assert!(*row >= usize::from(m.scroll));
         assert!(*row + 2 <= usize::from(m.scroll + body.height));
+    }
+    #[test]
+    fn home_button_returns_directly_to_token_home_from_details() {
+        let screen = Rect::new(0, 0, 40, 12);
+        let mut m = monitor();
+        key(&mut m, KeyCode::Enter);
+        assert!(m.session_browser.detail.is_some());
+        let index = m
+            .token_footer(screen)
+            .iter()
+            .position(|b| b.key == KeyCode::Char('H'))
+            .unwrap();
+        click_footer(&mut m, screen, index);
+        assert_eq!(m.page, config::PulseStartPage::Home);
+        assert!(m.session_browser.detail.is_none());
+        assert!(m.session_browser.query.is_empty());
+        assert_eq!(m.scroll, 0);
     }
 }

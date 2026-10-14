@@ -4,6 +4,8 @@ mod codex;
 mod config;
 mod diagnostics;
 mod discovery;
+mod file_editor;
+mod files;
 mod git;
 mod grok;
 mod herdr_install;
@@ -45,6 +47,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Internal Herdr file editor entrypoint
+    #[command(hide = true)]
+    FileEdit,
     /// Install this checkout as a Herdr plugin and configure its shortcut
     HerdrInstall {
         /// Checkout containing herdr-plugin.toml and target/release/mux
@@ -173,6 +178,9 @@ enum InternalCommand {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    if matches!(cli.command, Some(Commands::FileEdit)) {
+        return file_editor::run();
+    }
     if let Some(Commands::HerdrInstall { source, key }) = &cli.command {
         return herdr_install::run(source, key);
     }
@@ -231,7 +239,7 @@ fn main() -> Result<()> {
         Some(Commands::Update { .. }) => unreachable!(),
         Some(Commands::Migrate { .. }) => unreachable!(),
         Some(Commands::HerdrInstall { .. }) => unreachable!(),
-        Some(Commands::HerdrBind) => unreachable!(),
+        Some(Commands::HerdrBind) | Some(Commands::FileEdit) => unreachable!(),
         None => {
             let config = config::load(&paths.config)?;
             let import = if config.profiles.is_empty() {
