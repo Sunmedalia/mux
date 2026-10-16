@@ -39,7 +39,7 @@ use help::{HelpLanguage, HelpPage, help_area, help_content, help_footer};
 use model::*;
 pub(super) use widgets::preview_lines;
 use widgets::*;
-const CLIENTS: [&str; 4] = ["Claude", "Codex", "Grok", "All"];
+const CLIENTS: [&str; 5] = ["Claude", "Codex", "Grok", "All", "Pi"];
 
 pub(super) fn run(paths: AppPaths) -> Result<()> {
     let initial = initial_client(std::env::var("MUX_MONITOR_CLIENT").ok().as_deref());
@@ -128,6 +128,10 @@ pub(super) fn run(paths: AppPaths) -> Result<()> {
     let mut account_force = false;
     let mut switching: Option<mpsc::Receiver<std::result::Result<String, String>>> = None;
     loop {
+        if monitor.takeover.poll(&mut terminal)? {
+            redraw = true;
+            session_refresh.request();
+        }
         redraw |= monitor.git.poll();
         redraw |= monitor
             .files
@@ -218,6 +222,7 @@ pub(super) fn run(paths: AppPaths) -> Result<()> {
             monitor.reveal_session_selection(Rect::new(0, 0, size.width, size.height));
             terminal.draw(|f| {
                 monitor.draw(f);
+                monitor.takeover.draw(f);
                 monitor.pulse_theme.apply(f.buffer_mut());
             })?;
             redraw = false;
@@ -230,6 +235,9 @@ pub(super) fn run(paths: AppPaths) -> Result<()> {
         if matches!(&input, Event::Key(key) if key.kind == event::KeyEventKind::Press && key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
         {
             break;
+        }
+        if monitor.takeover.input(&input, &theme_paths.state_dir) {
+            continue;
         }
         let size = terminal.size()?;
         let screen = Rect::new(0, 0, size.width, size.height);
@@ -440,7 +448,7 @@ pub(super) fn run(paths: AppPaths) -> Result<()> {
                                 Some(KeyCode::Char('v'))
                             }
                             MouseEventKind::Down(MouseButton::Left) if m.row == area.y + 1 => {
-                                let tabs = Layout::horizontal([Constraint::Ratio(1, 4); 4])
+                                let tabs = Layout::horizontal([Constraint::Ratio(1, 5); 5])
                                     .split(Rect::new(area.x, area.y + 1, area.width, 1));
                                 if let Some(i) =
                                     tabs.iter().position(|r| contains(*r, m.column, m.row))
@@ -565,7 +573,7 @@ pub(super) fn run(paths: AppPaths) -> Result<()> {
                     monitor.client = (monitor.client + 1) % CLIENTS.len();
                     monitor.scroll = 0;
                 }
-                KeyCode::Char(c @ '1'..='4') => {
+                KeyCode::Char(c @ '1'..='5') => {
                     monitor.client = (c as u8 - b'1') as usize;
                     monitor.scroll = 0;
                 }
@@ -617,7 +625,7 @@ pub(super) fn open_pane() -> Result<()> {
     let current = herdr(&["pane", "current", "--current"])?;
     let pane = &current["result"]["pane"];
     // Capture the invoking agent before creating the new, agent-free monitor pane.
-    let client = ["claude", "codex", "grok", "all"][initial_client(pane["agent"].as_str())];
+    let client = ["claude", "codex", "grok", "all", "pi"][initial_client(pane["agent"].as_str())];
     let client_env = format!("MUX_MONITOR_CLIENT={client}");
     let workspace = pane["workspace_id"].as_str().context("Missing workspace")?;
     let tab = pane["tab_id"].as_str().context("Missing tab")?;
@@ -1679,7 +1687,8 @@ mod tests {
             assert_eq!(initial_client(Some(agent)), 0);
         }
         assert_eq!(initial_client(Some("codex")), 1);
-        for agent in [None, Some(""), Some("pi"), Some("unknown"), Some("all")] {
+        assert_eq!(initial_client(Some("pi")), 4);
+        for agent in [None, Some(""), Some("unknown"), Some("all")] {
             assert_eq!(initial_client(agent), 3);
         }
     }

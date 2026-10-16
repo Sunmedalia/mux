@@ -14,6 +14,7 @@ mod pi;
 mod preferences;
 mod quick;
 mod session_browser;
+mod session_takeover;
 mod settings;
 mod state;
 mod tabs;

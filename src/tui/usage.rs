@@ -18,6 +18,7 @@ struct UsageRead {
 
 #[derive(Default)]
 pub(super) struct UsageUi {
+    pub(super) takeover: session_takeover::Ui,
     pub active: bool,
     pub page: Option<UsagePage>,
     pub snapshot: Snapshot,
@@ -30,7 +31,7 @@ pub(super) struct UsageUi {
     sessions_reader: Option<crate::sessions::Reader>,
     sessions_receiver:
         Option<mpsc::Receiver<(crate::sessions::Reader, crate::sessions::Snapshot, bool)>>,
-    sessions_updated: Option<Instant>,
+    pub(super) sessions_updated: Option<Instant>,
     titles_updated: Option<Instant>,
     sessions_watcher: Option<crate::sessions::ChangeWatch>,
     sessions_events: Option<mpsc::Receiver<()>>,
@@ -699,6 +700,17 @@ impl App {
         }
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             return true;
+        }
+        if !searching
+            && key.code == KeyCode::Char('a')
+            && self
+                .usage
+                .page
+                .as_ref()
+                .is_some_and(|p| p.source == UsageSource::Sessions)
+        {
+            self.open_session_takeover();
+            return false;
         }
         if !searching && key.code == KeyCode::Char('?') {
             self.open_help();

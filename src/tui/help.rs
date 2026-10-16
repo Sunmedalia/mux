@@ -289,6 +289,10 @@ pub(super) fn help_commands(section: HelpSection) -> &'static [(&'static str, &'
                 "Sessions: toggle following dashboard dates (default: all dates)",
             ),
             ("s", "Sessions: toggle recent / token sort"),
+            (
+                "a",
+                "Sessions: resume the original CLI or hand off to Claude / Pi / Codex / Grok",
+            ),
             ("Search ↑↓", "Select session while typing"),
             (
                 "Search Enter / Esc",

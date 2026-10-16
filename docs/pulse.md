@@ -207,3 +207,15 @@ Provider 顶部与 Help 提供 **Disconnect [D]**：Claude 恢复接管前的设
 Grok Account 的额度条与 Balance 分开显示。服务未发布使用比例时，保留 `— used` 纹理额度条与重置时间，显示 `Usage not published`；不会把余额当作额度或把未知用量显示成 0%。
 
 主 Mux TUI 的 `F6` Usage 现在可通过顶部按钮或 `g` 切换 Gateway / Sessions。Sessions 复用 Pulse 的标题、字面搜索及排序规则，同时提供连续列表、宽屏详情预览和独立详情页；主界面不使用 Pulse 的终端焦点跟随。Display/Pulse 主题配置均有独立预览，Graphite 的 Call Health 成功与失败使用绿色和红色。
+
+### Sessions AI 接管
+
+完整 Mux 的 Usage → Sessions 和 Pulse 的 Sessions 列表、详情均可按 `a` 或点击 **AI / Take over**，选择 Claude、Pi、Codex 或 Grok，然后按 Enter / Start 启动。主界面的 SELECTED SESSION 预览区、详情页及底部操作栏提供可点击的 **Switch AI** 按钮，窄屏列表也显示该按钮。Pulse 在选中会话摘要、详情及底部操作栏提供同名按钮。Enter 查看详情的原有行为保留。Pi 会话从 `PI_CODING_AGENT_DIR` 对应的 `sessions` 目录采集，默认 `~/.pi/agent/sessions`；Pulse 的第五个客户端筛选为 Pi（`5`），原有 `1–4` 保留。
+
+Pulse 当前会话摘要中的 **Current AI(A)** 或 `A` 可直接接管当前会话；历史为空时底部 AI / `a` 也会使用当前会话。
+
+选择原客户端会通过精确 session ID 恢复（Pi 使用日志路径）；Herdr 中能唯一识别到原会话所在 pane 时直接聚焦，否则打开新标签。选择其他 AI 会在原项目目录创建一个新会话，并通过初始提示让它读取本地完整文本交接文件。文件包括持久化当前分支的消息、工具调用、工具结果及已有摘要；不额外调用模型生成摘要，不修改来源日志。原进程继续运行，交接只包含启动时快照，后续消息不会同步。目标 AI 沿用自己的模型、账号与权限设置。
+
+交接文件位于 Mux 状态目录的 `session-handoffs` 临时子目录，在目标 CLI 运行期间保留，退出后清理；异常退出的残留在后续接管时清理（超过一天且未被运行进程锁定）。图片和二进制只保留引用与说明，不包含隐藏推理。长对话由目标 AI 按需分段读取，不把正文塞进命令行参数。无法读取日志或完整解析时显示错误，不静默创建空白交接。
+
+Herdr 中启动的新标签退出 AI 后保留交互终端；独立运行 Mux / Pulse 时暂时释放当前终端，AI 正常退出、被中断或启动失败后恢复 Mux 页面和原有浏览位置。未安装的客户端显示不可用；原项目目录已不存在、日志丢失或 CLI 缺少必要参数时显示错误。子代理会话暂不支持接管。

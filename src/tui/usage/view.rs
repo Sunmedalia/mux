@@ -210,6 +210,7 @@ enum Action {
     Search,
     SessionScope,
     SessionCharts,
+    Takeover,
     Activate(usize),
 }
 impl UsagePage {
@@ -390,6 +391,30 @@ impl Canvas<'_, '_> {
     fn detail_content(&mut self, x: u16, y: usize, width: u16, mut line: Line<'static>) {
         line.spans.insert(0, Span::raw(" "));
         self.content(x, y, width, || line);
+    }
+    fn takeover_button(&mut self, x: u16, y: usize, width: u16, enabled: bool) {
+        let text = "[Switch AI(a)]";
+        let theme = self.theme;
+        self.detail_content(
+            x,
+            y,
+            width,
+            control_line(text, Action::Takeover, false, !enabled, theme),
+        );
+        if enabled
+            && let Some(screen_y) = self.visible(y)
+            && self.frame.is_some()
+        {
+            self.state.controls.push((
+                Rect::new(
+                    x + 2,
+                    screen_y,
+                    (text.width() as u16).min(width.saturating_sub(3)),
+                    1,
+                ),
+                Action::Takeover,
+            ));
+        }
     }
     fn header(&mut self, x: u16, y: usize, width: u16, title: &str, section: Option<usize>) {
         if let Some(section) = section {
@@ -1440,6 +1465,13 @@ impl App {
         if page.session_detail {
             c.header(x, y, width, "SESSION DETAILS", Some(5));
             y += 1;
+            c.takeover_button(
+                x,
+                y,
+                width,
+                selected.is_some_and(|(_, session)| !session.child),
+            );
+            y += 1;
             if let Some((_, session)) = selected {
                 for line in session_detail(session, width.saturating_sub(3)) {
                     c.detail_content(x, y, width, line);
@@ -1546,6 +1578,15 @@ impl App {
         let detail_x = x + list_width;
         let detail_width = width.saturating_sub(list_width);
         let detail_y = y;
+        if !split && !d.sessions.is_empty() {
+            c.takeover_button(
+                x,
+                y,
+                width,
+                selected.is_some_and(|(_, session)| !session.child),
+            );
+            y += 1;
+        }
         if d.sessions.is_empty() {
             let message =
                 if self.usage.sessions_updated.is_none() && self.usage.sessions.rows.is_empty() {
@@ -1634,6 +1675,13 @@ impl App {
                 detail_width,
                 "SELECTED SESSION",
                 None,
+            );
+            inspector_y += 1;
+            c.takeover_button(
+                detail_x,
+                inspector_y,
+                detail_width,
+                selected.is_some_and(|(_, session)| !session.child),
             );
             inspector_y += 1;
             if let Some((_, session)) = selected {
@@ -1774,6 +1822,7 @@ fn footer_controls(area: Rect, page: &UsagePage) -> Vec<(String, Action, Rect)> 
     } else if page.source == UsageSource::Sessions && page.session_detail {
         vec![
             ("Refresh r", "Refresh", Action::Refresh),
+            ("Switch AI a", "AI", Action::Takeover),
             ("Sessions q", "Back", Action::BackQuit),
         ]
     } else if page.source == UsageSource::Sessions {
@@ -1781,6 +1830,7 @@ fn footer_controls(area: Rect, page: &UsagePage) -> Vec<(String, Action, Rect)> 
             ("Charts c", "c", Action::SessionCharts),
             ("Search /", "Find", Action::Search),
             ("Open ↵", "Open", Action::Activate(5)),
+            ("Switch AI a", "AI", Action::Takeover),
             (
                 if page.session_sort_tokens {
                     "Tokens s"
@@ -1816,7 +1866,13 @@ fn footer_controls(area: Rect, page: &UsagePage) -> Vec<(String, Action, Rect)> 
     let mut x = area.x;
     let mut out = vec![];
     for (full, short, action) in buttons {
-        let label = if compact { short } else { full };
+        let label = if compact && matches!(action, Action::Takeover) && area.width >= 48 {
+            "Switch AI"
+        } else if compact {
+            short
+        } else {
+            full
+        };
         let width = (label.width() as u16 + 2).min(area.right().saturating_sub(x));
         if width == 0 {
             break;
@@ -1983,7 +2039,9 @@ impl App {
         state.controls = controls
             .into_iter()
             .chain(footer_buttons.iter().cloned())
-            .filter(|(_, a, _)| !matches!(a, Action::Activate(5)) || !d.sessions.is_empty())
+            .filter(|(_, a, _)| {
+                !matches!(a, Action::Activate(5) | Action::Takeover) || !d.sessions.is_empty()
+            })
             .map(|(_, a, r)| (r, a))
             .collect();
         let mut c = Canvas {
@@ -2026,7 +2084,8 @@ impl App {
                     &text,
                     action,
                     false,
-                    matches!(action, Action::Activate(5)) && d.sessions.is_empty(),
+                    matches!(action, Action::Activate(5) | Action::Takeover)
+                        && d.sessions.is_empty(),
                     self.theme,
                 )),
                 rect,
@@ -2073,6 +2132,24 @@ impl App {
                 Rect::new(viewport.right(), viewport.y, 1, viewport.height),
                 &mut scrollbar_state,
             );
+        }
+    }
+    pub(in crate::tui) fn open_session_takeover(&mut self) {
+        let source = self.usage.page.as_ref().and_then(|page| {
+            if page.source != UsageSource::Sessions || page.session_searching {
+                return None;
+            }
+            let state = page.dashboard.borrow();
+            let identity = state.selected[5].as_ref()?;
+            self.usage
+                .sessions
+                .rows
+                .iter()
+                .find(|s| session_browser::identity(s) == *identity)
+                .cloned()
+        });
+        if let Some(source) = source {
+            self.usage.takeover.open(source);
         }
     }
     pub(in crate::tui) fn usage_enter(&self, page: &mut UsagePage, key: KeyEvent) {
@@ -2203,6 +2280,11 @@ impl App {
                                 KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE),
                                 &self.usage.snapshot,
                             );
+                        }
+                        Action::Takeover => {
+                            self.usage.page = Some(page);
+                            self.open_session_takeover();
+                            return MouseAction::None;
                         }
                         Action::Sort => page.session_sort_tokens = !page.session_sort_tokens,
                         Action::Client(client) => {
@@ -2820,5 +2902,70 @@ mod tests {
         let buffer = render(&mut app, 120, 36, "claude-trends");
         assert!(text(&buffer).contains("peak 520"));
         assert!(!text(&buffer).contains("peak 10520"));
+    }
+    #[test]
+    fn selected_session_switch_button_is_clickable_in_list_preview_and_details() {
+        for (width, height, detail) in [(120, 36, false), (80, 24, false), (80, 24, true)] {
+            let (_temp, mut app) = fixture();
+            key(&mut app, KeyCode::Char('6'));
+            render(&mut app, width, height, "switch-list");
+            key(&mut app, KeyCode::Down);
+            render(&mut app, width, height, "switch-selected");
+            if detail {
+                key(&mut app, KeyCode::Enter);
+            }
+            let buffer = render(&mut app, width, height, "switch-button");
+            assert!(
+                text(&buffer).contains("[Switch AI(a)]"),
+                "{width}x{height} detail={detail}: {}",
+                text(&buffer)
+            );
+            let page = app.usage.page.as_ref().unwrap();
+            let identity = page.dashboard.borrow().selected[5].clone();
+            let viewport = page.dashboard.borrow().viewport;
+            assert!(
+                footer_controls(Rect::new(0, height - 1, width, 1), page)
+                    .iter()
+                    .any(|(label, action, _)| matches!(action, Action::Takeover)
+                        && label.contains("Switch AI"))
+            );
+            let rect = page
+                .dashboard
+                .borrow()
+                .controls
+                .iter()
+                .find(|(r, a)| matches!(a, Action::Takeover) && contains(viewport, r.x, r.y))
+                .unwrap()
+                .0;
+            app.usage_mouse(
+                MouseEvent {
+                    kind: MouseEventKind::Down(MouseButton::Left),
+                    column: rect.x,
+                    row: rect.y,
+                    modifiers: KeyModifiers::NONE,
+                },
+                Rect::new(0, 0, width, height),
+            );
+            assert!(app.usage.takeover.active());
+            assert_eq!(
+                app.usage.page.as_ref().unwrap().dashboard.borrow().selected[5],
+                identity
+            );
+        }
+        let (_temp, mut app) = fixture();
+        app.usage.sessions.rows.clear();
+        key(&mut app, KeyCode::Char('6'));
+        render(&mut app, 120, 36, "switch-empty");
+        assert!(
+            !app.usage
+                .page
+                .as_ref()
+                .unwrap()
+                .dashboard
+                .borrow()
+                .controls
+                .iter()
+                .any(|(_, a)| matches!(a, Action::Takeover))
+        );
     }
 }

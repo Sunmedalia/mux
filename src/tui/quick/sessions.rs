@@ -39,6 +39,8 @@ struct Layout {
     lines: Vec<Line<'static>>,
     rows: Vec<(usize, Identity)>,
     search: Option<usize>,
+    current_ai: Option<usize>,
+    switch_ai: Option<usize>,
 }
 impl Monitor {
     fn history_rows(&self) -> Vec<&Session> {
@@ -136,12 +138,20 @@ impl Monitor {
                 vec![
                     footer_control(["Refresh(r)", "Refresh", "r"], KeyCode::Char('r'), true),
                     footer_control(["Back(q)", "Back", "q"], KeyCode::Char('q'), true),
+                    footer_control(
+                        ["Switch AI(a)", "Switch AI", "AI"],
+                        KeyCode::Char('a'),
+                        true,
+                    ),
                     footer_control(["Home(H)", "Home", "H"], KeyCode::Char('H'), true),
                 ],
             );
         }
         let mut buttons = footer_buttons(area, self.page, self.sessions_sort_tokens);
         buttons[1].enabled = self.session_browser.selected.is_some();
+        if let Some(button) = buttons.iter_mut().find(|b| b.key == KeyCode::Char('a')) {
+            button.enabled = self.session_browser.selected.is_some() || self.active_row().is_some();
+        }
         buttons
     }
     fn begin_search(&mut self) {
@@ -177,6 +187,8 @@ impl Monitor {
             lines: vec![],
             rows: vec![],
             search: None,
+            current_ai: None,
+            switch_ai: None,
         };
         if let Some(id) = &self.session_browser.detail {
             layout.lines.push(line(
@@ -187,6 +199,13 @@ impl Monitor {
                 layout.lines.push(line("Session no longer available", GOLD));
                 return layout;
             };
+            if !s.child {
+                layout.switch_ai = Some(layout.lines.len());
+            }
+            layout.lines.push(line(
+                clipped("[Switch AI(a)]", width.into()),
+                if s.child { SOFT } else { BLUE },
+            ));
             let token = |n: i64, known: bool| {
                 if known {
                     format!("{n}{}", if s.incomplete { "+?" } else { "" })
@@ -306,6 +325,12 @@ impl Monitor {
             } else {
                 self.active_content(width)
             };
+            if self.active_row().is_some() {
+                layout.current_ai = Some(layout.lines.len());
+                layout
+                    .lines
+                    .push(line(clipped("[Current AI(A)]", width.into()), BLUE));
+            }
             layout.lines.push(section("SESSION HISTORY", width));
             layout.search = Some(layout.lines.len());
             layout.lines.push(line(
@@ -352,6 +377,13 @@ impl Monitor {
                     .as_ref()
                     .is_some_and(|id| id.matches(s))
             }) {
+                if !s.child {
+                    layout.switch_ai = Some(layout.lines.len());
+                }
+                layout.lines.push(line(
+                    clipped("[Switch AI(a)]", width.into()),
+                    if s.child { SOFT } else { BLUE },
+                ));
                 layout
                     .lines
                     .extend(wrap_field(&format!("ID: {}", s.id), width));
@@ -472,6 +504,29 @@ impl Monitor {
         let body = self.account_body(screen);
         match input {
             Event::Key(key) if key.kind == event::KeyEventKind::Press => match key.code {
+                KeyCode::Char('A') if self.session_browser.detail.is_none() => {
+                    if let Some(source) = self.active_row().cloned() {
+                        self.takeover.open(source);
+                    }
+                }
+                KeyCode::Char('a') => {
+                    let identity = self
+                        .session_browser
+                        .detail
+                        .as_ref()
+                        .or(self.session_browser.selected.as_ref());
+                    let source = identity
+                        .and_then(|id| self.sessions.rows.iter().find(|s| id.matches(s)))
+                        .cloned()
+                        .or_else(|| {
+                            (self.session_browser.detail.is_none() && identity.is_none())
+                                .then(|| self.active_row().cloned())
+                                .flatten()
+                        });
+                    if let Some(source) = source {
+                        self.takeover.open(source);
+                    }
+                }
                 KeyCode::Char('H') => self.return_home(),
                 KeyCode::Esc | KeyCode::Char('q') if self.session_browser.detail.is_some() => {
                     self.session_browser.detail = None;
@@ -520,10 +575,30 @@ impl Monitor {
                 }
                 MouseEventKind::ScrollUp => self.scroll = self.scroll.saturating_sub(3),
                 MouseEventKind::Down(MouseButton::Left)
+                    if {
+                        let row = usize::from(mouse.row - body.y) + usize::from(self.scroll);
+                        self.session_layout(body.width).switch_ai == Some(row)
+                            && mouse.column < body.x.saturating_add(body.width.min(14))
+                    } =>
+                {
+                    return self.sessions_input(
+                        &Event::Key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)),
+                        screen,
+                    );
+                }
+                MouseEventKind::Down(MouseButton::Left)
                     if self.session_browser.detail.is_none()
                         && mouse.column < body.right().saturating_sub(1) =>
                 {
                     let layout = self.session_layout(body.width);
+                    if layout.current_ai.is_some_and(|row| {
+                        row == usize::from(mouse.row - body.y) + usize::from(self.scroll)
+                    }) {
+                        if let Some(source) = self.active_row().cloned() {
+                            self.takeover.open(source);
+                        }
+                        return true;
+                    }
                     let row = usize::from(mouse.row - body.y) + usize::from(self.scroll);
                     if layout.search == Some(row) {
                         self.begin_search();
@@ -787,10 +862,10 @@ mod tests {
     fn footer_changes_by_depth_and_search_buttons_work_with_the_mouse() {
         let screen = Rect::new(0, 0, 60, 20);
         let mut m = monitor();
-        assert_eq!(m.token_footer(screen).len(), 5);
+        assert_eq!(m.token_footer(screen).len(), 6);
         click_footer(&mut m, screen, 1);
         assert!(m.session_browser.detail.is_some());
-        assert_eq!(m.token_footer(screen).len(), 3);
+        assert_eq!(m.token_footer(screen).len(), 4);
         assert!(
             m.token_footer(screen)
                 .iter()
@@ -953,5 +1028,70 @@ mod tests {
         assert!(m.session_browser.detail.is_none());
         assert!(m.session_browser.query.is_empty());
         assert_eq!(m.scroll, 0);
+    }
+    #[test]
+    fn current_session_can_be_taken_over_without_a_history_selection() {
+        let mut m = monitor();
+        let source = m.sessions.rows[0].clone();
+        m.sessions.rows = vec![source.clone()];
+        m.active_session = Some(AgentSession {
+            client: source.client,
+            id: source.id,
+        });
+        m.reconcile_sessions();
+        assert!(m.session_browser.selected.is_none());
+        let screen = Rect::new(0, 0, 60, 24);
+        assert!(
+            m.token_footer(screen)
+                .iter()
+                .any(|b| b.key == KeyCode::Char('a') && b.enabled)
+        );
+        key(&mut m, KeyCode::Char('a'));
+        assert!(m.takeover.active());
+        m.takeover.input(
+            &Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            std::path::Path::new("/unused"),
+        );
+        let body = m.account_body(screen);
+        m.scroll = m.session_layout(body.width).current_ai.unwrap() as u16;
+        assert!(m.sessions_input(
+            &Event::Mouse(event::MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: body.x,
+                row: body.y,
+                modifiers: KeyModifiers::NONE
+            }),
+            screen
+        ));
+        assert!(m.takeover.active());
+    }
+    #[test]
+    fn switch_ai_button_opens_menu_from_selected_session_and_detail() {
+        for detail in [false, true] {
+            for (width, height) in [(24, 12), (60, 24)] {
+                let mut m = monitor();
+                let screen = Rect::new(0, 0, width, height);
+                if detail {
+                    key(&mut m, KeyCode::Enter);
+                }
+                let body = m.account_body(screen);
+                let layout = m.session_layout(body.width);
+                let row = layout.switch_ai.unwrap();
+                assert!(layout.lines[row].to_string().contains("[Switch AI(a)]"));
+                let selected = m.session_browser.selected.clone();
+                m.scroll = row as u16;
+                assert!(m.sessions_input(
+                    &Event::Mouse(event::MouseEvent {
+                        kind: MouseEventKind::Down(MouseButton::Left),
+                        column: body.x,
+                        row: body.y,
+                        modifiers: KeyModifiers::NONE
+                    }),
+                    screen
+                ));
+                assert!(m.takeover.active());
+                assert_eq!(m.session_browser.selected, selected);
+            }
+        }
     }
 }

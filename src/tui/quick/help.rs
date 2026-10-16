@@ -179,13 +179,22 @@ pub(super) fn help_content(
         }
 
         HelpPage::Usage | HelpPage::Sessions | HelpPage::Charts => {
+            row(
+                &mut out,
+                "a / AI",
+                language.text(
+                    "Sessions: 原客户端继续或跨 AI 交接；A 接管当前会话",
+                    "Sessions: resume or hand off; A takes over the current session",
+                ),
+                width,
+            );
             heading(&mut out, language.text("常用操作", "Shortcuts"), width);
             row(
                 &mut out,
-                "Tab / 1–4",
+                "Tab / 1–5",
                 language.text(
-                    "筛选 Claude / Codex / Grok / 全部",
-                    "Filter Claude / Codex / Grok / All",
+                    "筛选 Claude / Codex / Grok / 全部 / Pi",
+                    "Filter Claude / Codex / Grok / All / Pi",
                 ),
                 width,
             );

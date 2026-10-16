@@ -516,7 +516,7 @@ impl Monitor {
                 pulse_help_rect(area),
             );
         }
-        let tabs = Layout::horizontal([Constraint::Ratio(1, 4); 4]).split(Rect::new(
+        let tabs = Layout::horizontal([Constraint::Ratio(1, 5); 5]).split(Rect::new(
             area.x,
             area.y.saturating_add(1),
             area.width,
@@ -524,7 +524,7 @@ impl Monitor {
         ));
         for (i, name) in CLIENTS.into_iter().enumerate() {
             let label = if area.width < 21 {
-                ["Cl", "Cx", "Gk", "All"][i]
+                ["Cl", "Cx", "Gk", "All", "Pi"][i]
             } else {
                 name
             };
@@ -564,7 +564,13 @@ impl Monitor {
         }
     }
     pub(super) fn client(&self) -> Option<&'static str> {
-        [Some("Claude"), Some("Codex"), Some("Grok"), None][self.client]
+        [
+            Some("Claude"),
+            Some("Codex"),
+            Some("Grok"),
+            None,
+            Some("Pi"),
+        ][self.client]
     }
     pub(super) fn provider_header_hit(&self, body: Rect, column: u16, row: u16) -> bool {
         if self.page == config::PulseStartPage::Sessions
@@ -1225,7 +1231,7 @@ impl Monitor {
             Paragraph::new("?(?)").style(Style::default().fg(SOFT)),
             pulse_help_rect(inner),
         );
-        let tabs = Layout::horizontal([Constraint::Ratio(1, 4); 4]).split(Rect::new(
+        let tabs = Layout::horizontal([Constraint::Ratio(1, 5); 5]).split(Rect::new(
             inner.x,
             inner.y + 1,
             inner.width,

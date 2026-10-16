@@ -14,6 +14,10 @@ impl App {
             redraw |= self.poll_codex();
             redraw |= self.poll_grok_auth();
             redraw |= self.poll_usage();
+            if self.usage.takeover.poll(terminal)? {
+                redraw = true;
+                self.usage.sessions_updated = None;
+            }
             if redraw {
                 terminal.draw(|frame| self.draw(frame))?;
                 redraw = false;
@@ -40,6 +44,9 @@ impl App {
             }
             let input = event::read()?;
             redraw = true;
+            if self.usage.takeover.input(&input, &self.paths.state_dir) {
+                continue;
+            }
             if self.screen.width < 40 || self.screen.height < 12 {
                 if matches!(input, Event::Key(key) if key.kind == event::KeyEventKind::Press && (key.code == KeyCode::Char('q') || (key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))))
                 {

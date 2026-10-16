@@ -2,6 +2,7 @@ use super::*;
 
 #[derive(Default)]
 pub(super) struct Monitor {
+    pub(super) takeover: session_takeover::Ui,
     pub(super) session_browser: sessions::Browser,
     pub(super) picker: Option<picker::Picker>,
     pub(super) accounts: accounts::Accounts,

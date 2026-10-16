@@ -3,6 +3,7 @@ use super::*;
 impl App {
     pub(super) fn draw(&mut self, frame: &mut ratatui::Frame) {
         self.draw_content(frame);
+        self.usage.takeover.draw(frame);
         let theme = match &self.modal {
             Some(Modal::SettingsMenu(menu)) => menu.theme,
             Some(Modal::Appearance(form)) => form.theme,

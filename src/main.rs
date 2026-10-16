@@ -50,6 +50,9 @@ enum Commands {
     /// Internal Herdr file editor entrypoint
     #[command(hide = true)]
     FileEdit,
+    /// Internal native AI session entrypoint
+    #[command(hide = true)]
+    SessionRun,
     /// Install this checkout as a Herdr plugin and configure its shortcut
     HerdrInstall {
         /// Checkout containing herdr-plugin.toml and target/release/mux
@@ -178,6 +181,9 @@ enum InternalCommand {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    if matches!(cli.command, Some(Commands::SessionRun)) {
+        return sessions::takeover::run();
+    }
     if matches!(cli.command, Some(Commands::FileEdit)) {
         return file_editor::run();
     }
@@ -239,7 +245,9 @@ fn main() -> Result<()> {
         Some(Commands::Update { .. }) => unreachable!(),
         Some(Commands::Migrate { .. }) => unreachable!(),
         Some(Commands::HerdrInstall { .. }) => unreachable!(),
-        Some(Commands::HerdrBind) | Some(Commands::FileEdit) => unreachable!(),
+        Some(Commands::HerdrBind) | Some(Commands::FileEdit) | Some(Commands::SessionRun) => {
+            unreachable!()
+        }
         None => {
             let config = config::load(&paths.config)?;
             let import = if config.profiles.is_empty() {

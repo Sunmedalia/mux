@@ -4,6 +4,7 @@ pub(super) fn initial_client(agent: Option<&str>) -> usize {
     match agent.unwrap_or("").to_ascii_lowercase().as_str() {
         "claude" | "claude-code" | "claudecode" | "claude code" => 0,
         "codex" => 1,
+        "pi" => 4,
         "grok" | "grokcli" | "grok-cli" | "grok cli" => 2,
         _ => 3,
     }
@@ -42,6 +43,7 @@ pub(super) fn agent_session(pane: &serde_json::Value) -> Option<AgentSession> {
     let agent = session["agent"].as_str()?;
     let client = match (pane["agent"].as_str().unwrap_or(agent), agent) {
         ("codex", "codex") => "Codex",
+        ("pi", "pi") => "Pi",
         ("claude", "claude") => "Claude",
         ("grok", "grok") => "Grok",
         _ => return None,
@@ -53,7 +55,7 @@ pub(super) fn agent_session(pane: &serde_json::Value) -> Option<AgentSession> {
             let path = std::path::Path::new(value);
             // Rollout filenames contain timestamps and may include a resume suffix.
             // The session metadata carries the actual thread ID.
-            let id = if client == "Codex" {
+            let id = if matches!(client, "Codex" | "Pi") {
                 crate::sessions::id_from_log(path)?
             } else {
                 path.file_stem()?.to_str()?.to_owned()

@@ -13,6 +13,8 @@ use std::{
     time::SystemTime,
 };
 
+mod handoff;
+pub mod takeover;
 mod titles;
 
 /// Keeps partial watches alive while reporting full coverage and runtime health.
@@ -143,6 +145,8 @@ impl Tokens {
 #[derive(Clone, Debug, Default)]
 pub struct Session {
     pub id: String,
+    /// Source logs, retained without conversation bodies for on-demand continuation.
+    pub sources: Vec<PathBuf>,
     pub title: Option<String>,
     pub client: &'static str,
     pub project: String,
@@ -215,6 +219,67 @@ impl CachedFile {
             self.grok_timings.remove(prompt);
         }
         self.messages.insert(prompt.into(), (tokens, timestamp));
+    }
+    fn observe_pi(&mut self, v: &Value) {
+        let s = &mut self.session;
+        s.client = "Pi";
+        if let Some(t) = v["timestamp"]
+            .as_str()
+            .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+        {
+            s.updated = s.updated.max(t.timestamp());
+        }
+        match v["type"].as_str() {
+            Some("session") => {
+                if let Some(id) = v["id"].as_str() {
+                    s.id = id.into();
+                }
+                if let Some(cwd) = v["cwd"].as_str() {
+                    s.project = cwd.into();
+                }
+                s.fork = v["parentSession"].is_string();
+            }
+            Some("session_info") => {
+                s.title = titles::clean(v["name"].as_str());
+            }
+            Some("model_change") => {
+                if let Some(model) = v["modelId"].as_str() {
+                    s.models.insert(model.into());
+                }
+            }
+            Some("message" | "usage") => {
+                let m = if v["type"] == "usage" {
+                    v
+                } else {
+                    &v["message"]
+                };
+                if let Some(model) = m["model"].as_str() {
+                    s.models.insert(model.into());
+                }
+                let u = &m["usage"];
+                if u.is_object() {
+                    let n = |k: &str| u[k].as_i64().unwrap_or(0).max(0);
+                    let tokens = Tokens {
+                        input: n("input")
+                            .saturating_add(n("cacheRead"))
+                            .saturating_add(n("cacheWrite")),
+                        output: n("output"),
+                        read: n("cacheRead"),
+                        write: n("cacheWrite"),
+                        known: u["input"].is_number() && u["output"].is_number(),
+                        cache_known: u["cacheRead"].is_number(),
+                    };
+                    s.tokens.add(&tokens);
+                    if let Some(t) = v["timestamp"]
+                        .as_str()
+                        .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+                    {
+                        *s.activity.entry(t.timestamp()).or_default() += tokens.total();
+                    }
+                }
+            }
+            _ => {}
+        }
     }
     fn observe(&mut self, v: &Value, claude: bool) {
         let s = &mut self.session;
@@ -342,13 +407,16 @@ impl CachedFile {
         {
             *self = Self::default();
         }
+        self.session.sources = vec![path.to_path_buf()];
         if self.offset == meta.len() && self.modified == modified {
             return Ok(());
         }
         self.identity = identity;
         self.modified = modified;
         let grok = path.file_name().is_some_and(|name| name == "updates.jsonl");
-        self.session.client = if grok {
+        self.session.client = if self.session.client == "Pi" {
+            "Pi"
+        } else if grok {
             "Grok"
         } else if claude {
             "Claude"
@@ -448,7 +516,9 @@ impl CachedFile {
             self.offset += count as u64;
             match serde_json::from_slice::<Value>(&line) {
                 Ok(v) => {
-                    if grok {
+                    if v["type"] == "session" || self.session.client == "Pi" {
+                        self.observe_pi(&v)
+                    } else if grok {
                         self.observe_grok(&v)
                     } else {
                         self.observe(&v, claude)
@@ -532,9 +602,17 @@ impl Reader {
                 continue;
             }
             let entry = unique.entry((s.client, &s.id)).or_insert_with(|| s.clone());
+            let mut sources = entry.sources.clone();
+            sources.extend(
+                s.sources
+                    .iter()
+                    .filter(|p| !entry.sources.contains(p))
+                    .cloned(),
+            );
             if s.updated > entry.updated {
                 *entry = s.clone();
             }
+            entry.sources = sources;
             if s.client == "Codex" {
                 let best = codex_tokens.entry(&s.id).or_default();
                 if s.tokens.known && (!best.known || s.tokens.total() >= best.total()) {
@@ -623,6 +701,8 @@ pub fn id_from_log(path: &Path) -> Option<String> {
         record["payload"]["id"]
             .as_str()
             .or_else(|| record["payload"]["session_id"].as_str())
+    } else if record["type"] == "session" {
+        record["id"].as_str()
     } else {
         record["sessionId"].as_str()
     }?;
@@ -676,6 +756,7 @@ pub fn roots() -> anyhow::Result<Vec<(PathBuf, bool)>> {
     let codex = crate::codex::home()?;
     Ok(vec![
         (crate::grok::home()?.join("sessions"), false),
+        (crate::pi::home()?.join("sessions"), false),
         (claude.parent().unwrap().join("projects"), true),
         (codex.join("sessions"), false),
         (codex.join("archived_sessions"), false),
@@ -881,6 +962,42 @@ mod tests {
         changes
             .recv_timeout(std::time::Duration::from_secs(5))
             .unwrap();
+    }
+
+    #[test]
+    fn pi_sessions_keep_metadata_and_incremental_usage_without_bodies() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("2026_pi.jsonl");
+        append(
+            &path,
+            json!({"type":"session","id":"pi-id","timestamp":"2026-10-15T00:00:00Z","cwd":"/project"}),
+        );
+        append(
+            &path,
+            json!({"type":"session_info","id":"info","name":"Pi title"}),
+        );
+        append(
+            &path,
+            json!({"type":"message","id":"m","timestamp":"2026-10-15T00:01:00Z","message":{"role":"assistant","model":"pi-model","content":"body not retained","usage":{"input":10,"output":3,"cacheRead":4,"cacheWrite":2}}}),
+        );
+        let mut reader = Reader::default();
+        let roots = [(temp.path().to_path_buf(), false)];
+        let first = reader.read(&roots);
+        let row = &first.rows[0];
+        assert_eq!(
+            (row.client, row.id.as_str(), row.project.as_str()),
+            ("Pi", "pi-id", "/project")
+        );
+        assert_eq!(row.title.as_deref(), Some("Pi title"));
+        assert_eq!(row.tokens.total(), 19);
+        assert_eq!(row.sources, vec![path.clone()]);
+        assert_eq!(id_from_log(&path).as_deref(), Some("pi-id"));
+        append(
+            &path,
+            json!({"type":"usage","id":"u","timestamp":"2026-10-15T00:02:00Z","model":"pi-model","usage":{"input":1,"output":0,"cacheRead":1,"cacheWrite":0}}),
+        );
+        assert_eq!(reader.read(&roots).rows[0].tokens.total(), 21);
+        assert_eq!(reader.read(&roots).rows[0].tokens.total(), 21);
     }
 
     #[test]

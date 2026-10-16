@@ -673,6 +673,11 @@ pub(super) fn footer_buttons(
             footer_control(["Search(/)", "Search", "/"], KeyCode::Char('/'), true),
             footer_control(["Open(Enter)", "Open", "↵"], KeyCode::Enter, true),
             footer_control(
+                ["Switch AI(a)", "Switch AI", "AI"],
+                KeyCode::Char('a'),
+                true,
+            ),
+            footer_control(
                 if sort_tokens {
                     ["Recent(t)", "Recent", "t"]
                 } else {

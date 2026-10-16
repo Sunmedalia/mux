@@ -30,3 +30,9 @@ id = "file-editor"
 title = "File"
 placement = "tab"
 command = ["./target/release/mux", "file-edit"]
+
+[[panes]]
+id = "session"
+title = "AI Session"
+placement = "tab"
+command = ["./target/release/mux", "session-run"]
