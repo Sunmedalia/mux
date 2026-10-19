@@ -647,7 +647,7 @@ fn open_pane_with(mut herdr: impl FnMut(&[&str]) -> Result<serde_json::Value>) -
                 .as_str()
                 .context("Missing monitor pane")?;
             let process = herdr(&["pane", "process-info", "--pane", id])?;
-            let binary = std::env::current_exe()?;
+            let binary = std::fs::canonicalize(std::env::current_exe()?)?;
             let plugin = herdr(&["plugin", "list", "--plugin", "mux", "--json"])?;
             let linked_binary = plugin["result"]["plugins"]
                 .as_array()
