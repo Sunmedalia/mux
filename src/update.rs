@@ -358,11 +358,11 @@ mod tests {
     fn release_zip_extracts_only_the_named_executable() {
         let mut archive = zip::ZipWriter::new(Cursor::new(Vec::new()));
         archive
-            .start_file("README.md", zip::write::FileOptions::default())
+            .start_file("README.md", zip::write::SimpleFileOptions::default())
             .unwrap();
         archive.write_all(b"readme").unwrap();
         archive
-            .start_file("mux.exe", zip::write::FileOptions::default())
+            .start_file("mux.exe", zip::write::SimpleFileOptions::default())
             .unwrap();
         archive.write_all(b"binary").unwrap();
         let bytes = archive.finish().unwrap().into_inner();
