@@ -1,6 +1,6 @@
 id = "mux"
 name = "Mux Pulse"
-version = "0.1.22"
+version = "0.1.23"
 description = "Persistent side pane for agent usage, accounts, Git working trees and files"
 min_herdr_version = "0.7.0"
 platforms = ["macos", "linux"]

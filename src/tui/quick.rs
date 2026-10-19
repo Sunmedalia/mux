@@ -622,6 +622,10 @@ pub(super) fn open_pane() -> Result<()> {
         std::env::var("HERDR_ENV").as_deref() == Ok("1"),
         "Open the monitor from inside Herdr"
     );
+    open_pane_with(herdr)
+}
+
+fn open_pane_with(mut herdr: impl FnMut(&[&str]) -> Result<serde_json::Value>) -> Result<()> {
     let current = herdr(&["pane", "current", "--current"])?;
     let pane = &current["result"]["pane"];
     // Capture the invoking agent before creating the new, agent-free monitor pane.
@@ -634,55 +638,57 @@ pub(super) fn open_pane() -> Result<()> {
     let workspace_env = format!("MUX_MONITOR_WORKSPACE={workspace}");
     let tab_env = format!("MUX_MONITOR_TAB={tab}");
     let list = herdr(&["pane", "list", "--workspace", workspace])?;
-    if let Some(existing) = list["result"]["panes"].as_array().and_then(|panes| {
-        panes
+    if let Some(panes) = list["result"]["panes"].as_array() {
+        for existing in panes
             .iter()
-            .find(|p| p["tab_id"] == tab && p["label"] == LABEL)
-    }) {
-        let id = existing["pane_id"]
-            .as_str()
-            .context("Missing monitor pane")?;
-        let process = herdr(&["pane", "process-info", "--pane", id])?;
-        let binary = std::env::current_exe()?;
-        let plugin = herdr(&["plugin", "list", "--plugin", "mux", "--json"])?;
-        let linked_binary = plugin["result"]["plugins"]
-            .as_array()
-            .and_then(|plugins| plugins.first())
-            .and_then(|plugin| plugin["plugin_root"].as_str())
-            .and_then(|root| {
-                std::fs::canonicalize(std::path::Path::new(root).join("target/release/mux")).ok()
-            });
-        let is_monitor = process["result"]["process_info"]["foreground_processes"]
-            .as_array()
-            .is_some_and(|ps| {
-                ps.iter().any(|p| {
-                    p["argv"].as_array().is_some_and(|args| {
-                        let executable = args
-                            .first()
-                            .and_then(|a| a.as_str())
-                            .map(std::path::Path::new);
-                        let executable = executable.map(|path| {
-                            if path.is_absolute() {
-                                path.to_path_buf()
-                            } else {
-                                std::path::Path::new(p["cwd"].as_str().unwrap_or("")).join(path)
-                            }
-                        });
-                        args.len() == 2
-                            && args[1] == "quick"
-                            && executable
-                                .and_then(|path| std::fs::canonicalize(path).ok())
-                                .is_some_and(|path| {
-                                    path == binary || linked_binary.as_ref() == Some(&path)
-                                })
+            .filter(|p| p["tab_id"] == tab && p["label"] == LABEL)
+        {
+            let id = existing["pane_id"]
+                .as_str()
+                .context("Missing monitor pane")?;
+            let process = herdr(&["pane", "process-info", "--pane", id])?;
+            let binary = std::env::current_exe()?;
+            let plugin = herdr(&["plugin", "list", "--plugin", "mux", "--json"])?;
+            let linked_binary = plugin["result"]["plugins"]
+                .as_array()
+                .and_then(|plugins| plugins.first())
+                .and_then(|plugin| plugin["plugin_root"].as_str())
+                .and_then(|root| {
+                    std::fs::canonicalize(std::path::Path::new(root).join("target/release/mux"))
+                        .ok()
+                });
+            let is_monitor = process["result"]["process_info"]["foreground_processes"]
+                .as_array()
+                .is_some_and(|ps| {
+                    ps.iter().any(|p| {
+                        p["argv"].as_array().is_some_and(|args| {
+                            let executable = args
+                                .first()
+                                .and_then(|a| a.as_str())
+                                .map(std::path::Path::new);
+                            let executable = executable.map(|path| {
+                                if path.is_absolute() {
+                                    path.to_path_buf()
+                                } else {
+                                    std::path::Path::new(p["cwd"].as_str().unwrap_or("")).join(path)
+                                }
+                            });
+                            args.len() == 2
+                                && args[1] == "quick"
+                                && executable
+                                    .and_then(|path| std::fs::canonicalize(path).ok())
+                                    .is_some_and(|path| {
+                                        path == binary || linked_binary.as_ref() == Some(&path)
+                                    })
+                        })
                     })
-                })
-            });
-        anyhow::ensure!(
-            is_monitor,
-            "The pane named Mux Pulse is no longer running the monitor; leave it open"
-        );
-        return herdr(&["pane", "close", id]).map(|_| ());
+                });
+            // Restored panes can keep this label after their monitor exits.
+            // Leave their current shell/agent intact and keep looking for Pulse.
+            if is_monitor {
+                return herdr(&["pane", "close", id]).map(|_| ());
+            }
+        }
     }
     let cwd = std::env::current_dir()?;
     let layout = herdr(&["pane", "layout", "--pane", target])?;
@@ -775,6 +781,73 @@ mod tests {
     use super::*;
     use ratatui::backend::TestBackend;
     use serde_json::json;
+
+    #[test]
+    fn pulse_toggle_ignores_reused_panes_and_finds_a_live_monitor() {
+        for live_monitor in [false, true] {
+            let mut calls = Vec::new();
+            let binary = std::env::current_exe().unwrap();
+            open_pane_with(|args| {
+                calls.push(args.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+                Ok(match args {
+                    ["pane", "current", "--current"] => json!({"result":{"pane":{
+                        "workspace_id":"workspace", "tab_id":"tab", "pane_id":"caller",
+                        "agent":"codex"
+                    }}}),
+                    ["pane", "list", "--workspace", "workspace"] => {
+                        let mut panes = vec![json!({
+                            "pane_id":"caller", "tab_id":"tab", "label":LABEL
+                        })];
+                        if live_monitor {
+                            panes.push(json!({
+                                "pane_id":"monitor", "tab_id":"tab", "label":LABEL
+                            }));
+                        }
+                        json!({"result":{"panes":panes}})
+                    }
+                    ["pane", "process-info", "--pane", id] => {
+                        let argv = if *id == "monitor" {
+                            json!([binary, "quick"])
+                        } else {
+                            json!(["codex"])
+                        };
+                        json!({"result":{"process_info":{"foreground_processes":[{
+                            "argv":argv
+                        }]}}})
+                    }
+                    ["plugin", "list", "--plugin", "mux", "--json"] => {
+                        json!({"result":{"plugins":[]}})
+                    }
+                    ["pane", "layout", "--pane", "caller"] => json!({"result":{"layout":{
+                        "area":{"x":0,"width":200},
+                        "panes":[{"pane_id":"caller","rect":{"x":0,"width":200,"height":40}}]
+                    }}}),
+                    ["plugin", "pane", "open", ..] => {
+                        json!({"result":{"plugin_pane":{"pane":{"pane_id":"new-monitor"}}}})
+                    }
+                    ["pane", "close", "monitor"]
+                    | ["pane", "rename", "new-monitor", LABEL]
+                    | ["pane", "resize", ..] => serde_json::Value::Null,
+                    _ => panic!("Unexpected Herdr call: {args:?}"),
+                })
+            })
+            .unwrap();
+            assert_eq!(
+                calls
+                    .iter()
+                    .any(|args| args == &["pane", "close", "monitor"]),
+                live_monitor
+            );
+            assert_eq!(
+                calls.iter().any(|args| args.starts_with(&[
+                    "plugin".into(),
+                    "pane".into(),
+                    "open".into()
+                ])),
+                !live_monitor
+            );
+        }
+    }
 
     #[test]
     fn pulse_saved_defaults_apply_at_start_and_hot_reload_keeps_current_page() {
